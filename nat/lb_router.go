@@ -8,6 +8,7 @@ import (
 
 type Router struct {
 	serverList []*Server
+	lb         *Server
 	objs       bpfObjects
 	xdpProgram link.Link
 	iface      *net.Interface
@@ -35,18 +36,34 @@ func NewRouter(ifaceName string) (*Router, error) {
 	})
 
 	if err != nil {
-		router.objs.Close()
+		router.Close()
 		return nil, err
 	}
 
 	servs, err := initServers()
 	if err != nil {
-		router.objs.Close()
-		router.xdpProgram.Close()
+		router.Close()
 		return nil, err
 	}
 
 	if err := router.UpdateServer(servs); err != nil {
+		router.Close()
+		return nil, err
+	}
+
+	lb, err := initLB()
+	if err != nil {
+		router.Close()
+		return nil, err
+	}
+
+	if err := router.UpdateLB(lb); err != nil {
+		router.Close()
+		return nil, err
+	}
+
+	if err != nil {
+		router.Close()
 		return nil, err
 	}
 
@@ -67,7 +84,21 @@ func (r *Router) UpdateServer(servers []*Server) error {
 	return nil
 }
 
+func (r *Router) UpdateLB(server *Server) error {
+	var key uint32 = 0
+	if err := r.objs.Lb.Put(&key, &bpfServerConfig{
+		Ip:  server.IP,
+		Mac: [6]uint8(server.Mac),
+	}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (r *Router) Close() {
-	defer r.objs.Close()
-	defer r.xdpProgram.Close()
+	r.objs.Close()
+	if r.xdpProgram != nil {
+		r.xdpProgram.Close()
+	}
 }

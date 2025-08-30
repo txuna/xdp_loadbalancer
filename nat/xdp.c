@@ -11,7 +11,8 @@
 // #include "bpf_endian.h"
 #include "common.h"
 
-#define SERVER_NUM 3 // 0 is loadbalancer
+#define SERVER_NUM 2
+#define LB_NUM 1
 #define MAX_TCP_CHECK_WORDS 750 // max 1500 bytes to check in TCP checksum. This is MTU dependent
 
 char _license[] SEC("license") = "GPL";
@@ -27,6 +28,13 @@ struct {
 	__type(key, __u32);
 	__type(value, struct server_config);
 } servers SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY); 
+	__uint(max_entries, LB_NUM);
+	__type(key, __u32); 
+	__type(value, struct server_config);
+} lb SEC(".maps");
 
 static __always_inline __u16
 csum_fold_helper(__u64 csum)

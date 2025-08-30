@@ -69,6 +69,7 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
+	Lb      *ebpf.MapSpec `ebpf:"lb"`
 	Servers *ebpf.MapSpec `ebpf:"servers"`
 }
 
@@ -98,11 +99,13 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
+	Lb      *ebpf.Map `ebpf:"lb"`
 	Servers *ebpf.Map `ebpf:"servers"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
+		m.Lb,
 		m.Servers,
 	)
 }
