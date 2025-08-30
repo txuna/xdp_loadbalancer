@@ -122,6 +122,27 @@ int xdp_main(struct xdp_md *ctx) {
 	bpf_printk("Received Destination IP: 0x%x\n", bpf_ntohl(iph->daddr));
 	bpf_printk("Received Source MAC: %x:%x:%x:%x:%x:%x\n", eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5]);
     bpf_printk("Received Destination MAC: %x:%x:%x:%x:%x:%x\n", eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
+
+
+	/*
 	
+		Client -> Load Balanccer -> Server
+		Destination Mac = Server Mac
+		Destination IP = Server IP
+
+		Source Mac = LB Mac
+		Source IP = LB IP
+	*/
+
+	/*
+		Server -> Load Balancer -> Client
+
+		Destination Mac = Client Mac
+		Destination IP = Client IP
+
+		Source Mac = LB Mac
+		Source IP = LB IP
+	*/
+
 	return XDP_PASS;
 }
