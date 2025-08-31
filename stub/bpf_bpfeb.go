@@ -8,28 +8,9 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
-	"structs"
 
 	"github.com/cilium/ebpf"
 )
-
-type bpfEvent struct {
-	_       structs.HostLayout
-	Kind    uint32
-	SrcMac  [6]uint8
-	DstMac  [6]uint8
-	SrcIp   uint32
-	DstIp   uint32
-	SrcPort uint16
-	DstPort uint16
-}
-
-type bpfServerConfig struct {
-	_   structs.HostLayout
-	Ip  uint32
-	Mac [6]uint8
-	_   [2]byte
-}
 
 // loadBpf returns the embedded CollectionSpec for bpf.
 func loadBpf() (*ebpf.CollectionSpec, error) {
@@ -80,18 +61,12 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	Events  *ebpf.MapSpec `ebpf:"events"`
-	Servers *ebpf.MapSpec `ebpf:"servers"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
-	ClientIp        *ebpf.VariableSpec `ebpf:"client_ip"`
-	ClientMac       *ebpf.VariableSpec `ebpf:"client_mac"`
-	LoadBalancerIp  *ebpf.VariableSpec `ebpf:"load_balancer_ip"`
-	LoadBalancerMac *ebpf.VariableSpec `ebpf:"load_balancer_mac"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -114,25 +89,16 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	Events  *ebpf.Map `ebpf:"events"`
-	Servers *ebpf.Map `ebpf:"servers"`
 }
 
 func (m *bpfMaps) Close() error {
-	return _BpfClose(
-		m.Events,
-		m.Servers,
-	)
+	return _BpfClose()
 }
 
 // bpfVariables contains all global variables after they have been loaded into the kernel.
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
-	ClientIp        *ebpf.Variable `ebpf:"client_ip"`
-	ClientMac       *ebpf.Variable `ebpf:"client_mac"`
-	LoadBalancerIp  *ebpf.Variable `ebpf:"load_balancer_ip"`
-	LoadBalancerMac *ebpf.Variable `ebpf:"load_balancer_mac"`
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.

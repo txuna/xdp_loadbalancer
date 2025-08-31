@@ -5,7 +5,6 @@ package main
 import (
 	"log"
 	"os"
-	"time"
 )
 
 func main() {
@@ -21,5 +20,8 @@ func main() {
 
 	defer router.Close()
 
-	time.Sleep(100 * time.Second)
+	if err := router.Ring(); err != nil {
+		log.Printf("failed to ring: %s", err)
+		return
+	}
 }

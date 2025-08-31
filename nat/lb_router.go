@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"log"
 	"net"
 
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
 )
 
 type Router struct {
 	serverList []*Server
-	lb         *Server
 	objs       bpfObjects
+	rd         *ringbuf.Reader
 	xdpProgram link.Link
 	iface      *net.Interface
 }
@@ -51,22 +56,6 @@ func NewRouter(ifaceName string) (*Router, error) {
 		return nil, err
 	}
 
-	lb, err := initLB()
-	if err != nil {
-		router.Close()
-		return nil, err
-	}
-
-	if err := router.UpdateLB(lb); err != nil {
-		router.Close()
-		return nil, err
-	}
-
-	if err != nil {
-		router.Close()
-		return nil, err
-	}
-
 	return router, nil
 }
 
@@ -84,15 +73,39 @@ func (r *Router) UpdateServer(servers []*Server) error {
 	return nil
 }
 
-func (r *Router) UpdateLB(server *Server) error {
-	var key uint32 = 0
-	if err := r.objs.Lb.Put(&key, &bpfServerConfig{
-		Ip:  server.IP,
-		Mac: [6]uint8(server.Mac),
-	}); err != nil {
+func (r *Router) Ring() error {
+
+	var err error
+	r.rd, err = ringbuf.NewReader(r.objs.Events)
+	if err != nil {
 		return err
 	}
 
+	log.Println("waiting for events...")
+	var event bpfEvent
+	for {
+		record, err := r.rd.Read()
+		if err != nil {
+			if errors.Is(err, ringbuf.ErrClosed) {
+				break
+			}
+
+			log.Printf("reading from reader: %s\n", err)
+			continue
+		}
+
+		if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
+			log.Printf("parsing ringbuf event: %s\n", err)
+			continue
+		}
+
+		log.Printf("(%s:%d) -> (%s:%d)\n",
+			IPv4NToString(event.SrcIp),
+			Ntohs(event.SrcPort),
+			IPv4NToString(event.DstIp),
+			Ntohs(event.DstPort))
+
+	}
 	return nil
 }
 
@@ -101,4 +114,25 @@ func (r *Router) Close() {
 	if r.xdpProgram != nil {
 		r.xdpProgram.Close()
 	}
+
+	if r.rd != nil {
+		r.rd.Close()
+	}
+}
+
+func IPv4NToString(n uint32) string {
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], n)
+	return net.IP(b[:]).String()
+}
+
+func IPv4HToString(n uint32) string {
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], n)
+	return net.IP(b[:]).String()
+}
+
+func Ntohs(p uint16) uint16 {
+	// network(big endian) → host(little endian, x86 기준)
+	return (p >> 8) | (p << 8)
 }

@@ -12,14 +12,19 @@
 #include "common.h"
 
 #define SERVER_NUM 2
-#define LB_NUM 1
 #define MAX_TCP_CHECK_WORDS 750 // max 1500 bytes to check in TCP checksum. This is MTU dependent
 
 char _license[] SEC("license") = "GPL";
 
+int client_ip = bpf_htonl(0xa000001);
+__u8 client_mac[ETH_ALEN] = {0xDE, 0xAD, 0xBE, 0xEF, 0x0, 0x1};
+
+int load_balancer_ip = bpf_htonl(0xa00000a);
+__u8 load_balancer_mac[ETH_ALEN] = {0xDE, 0xAD, 0xBE, 0xEF, 0x0, 0x10};
+
 struct server_config {
 	__u32 ip;
-	u8 	mac[ETH_ALEN];
+	__u8 mac[ETH_ALEN];
 };
 
 struct {
@@ -29,12 +34,20 @@ struct {
 	__type(value, struct server_config);
 } servers SEC(".maps");
 
+struct event {
+	__u32 kind;
+	__u8 src_mac[ETH_ALEN];
+	__u8 dst_mac[ETH_ALEN];
+	__u32 src_ip; 
+	__u32 dst_ip; 
+	__u16 src_port;
+	__u16 dst_port;
+};
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY); 
-	__uint(max_entries, LB_NUM);
-	__type(key, __u32); 
-	__type(value, struct server_config);
-} lb SEC(".maps");
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1 << 24);
+	__type(value, struct event);
+} events SEC(".maps");
 
 static __always_inline __u16
 csum_fold_helper(__u64 csum)
@@ -46,14 +59,6 @@ csum_fold_helper(__u64 csum)
             csum = (csum & 0xffff) + (csum >> 16);
     }
     return ~csum;
-}
-
-static __always_inline __u16
-iph_csum(struct iphdr *iph)
-{
-    iph->check = 0;
-    unsigned long long csum = bpf_csum_diff(0, 0, (unsigned int *)iph, sizeof(struct iphdr), 0);
-    return csum_fold_helper((__u64)csum);
 }
 
 static __always_inline __u16
@@ -85,12 +90,23 @@ tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
     return ~sum;
 }
 
+static __always_inline __u16
+iph_csum(struct iphdr *iph)
+{
+    iph->check = 0;
+    unsigned long long csum = bpf_csum_diff(0, 0, (unsigned int *)iph, sizeof(struct iphdr), 0);
+    return csum_fold_helper(csum);
+}
+
+
+
 SEC("xdp")
 int xdp_main(struct xdp_md *ctx) {
 	void *data_end = (void*)(long)ctx->data_end;
 	void *data = (void*)(long)ctx->data;
+	struct event *es;
 
-	bpf_printk("xdp loadbalancer received packet!"); 
+	// bpf_printk("xdp loadbalancer received packet!"); 
 
 	struct ethhdr *eth = data;
 	if ((void*)(eth + 1) > data_end) {
@@ -118,11 +134,17 @@ int xdp_main(struct xdp_md *ctx) {
 		return XDP_PASS;
 	}
 
-	bpf_printk("Received Source IP: 0x%x\n", bpf_ntohl(iph->saddr));
-	bpf_printk("Received Destination IP: 0x%x\n", bpf_ntohl(iph->daddr));
-	bpf_printk("Received Source MAC: %x:%x:%x:%x:%x:%x\n", eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5]);
-    bpf_printk("Received Destination MAC: %x:%x:%x:%x:%x:%x\n", eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
-
+	// logging
+	es = bpf_ringbuf_reserve(&events, sizeof(struct event), 0);
+	if (!es) {
+		return XDP_PASS;
+	}
+	
+	es->src_ip = iph->saddr;
+	es->src_port = tcph->source;
+	es->dst_ip = iph->daddr;
+	es->dst_port = tcph->dest;
+	bpf_ringbuf_submit(es, 0);
 
 	/*
 	
@@ -133,6 +155,18 @@ int xdp_main(struct xdp_md *ctx) {
 		Source Mac = LB Mac
 		Source IP = LB IP
 	*/
+	if(iph->saddr == client_ip) {
+		bpf_printk("from client\n");
+		__u32 key = 0;
+		struct server_config *server = bpf_map_lookup_elem(&servers, &key);
+		if (!server) {
+			return XDP_PASS;
+		}
+
+		// set server address and mac
+		iph->daddr = server->ip;
+		__builtin_memcpy(eth->h_dest, server->mac, ETH_ALEN);
+	}
 
 	/*
 		Server -> Load Balancer -> Client
@@ -143,6 +177,25 @@ int xdp_main(struct xdp_md *ctx) {
 		Source Mac = LB Mac
 		Source IP = LB IP
 	*/
+	else if (iph->saddr == bpf_ntohl(0xa000002)){
+		// set client address and mac
+		bpf_printk("from server\n");
+		iph->daddr = client_ip;
+		__builtin_memcpy(eth->h_dest, client_mac, ETH_ALEN);
+	}
+	
+	iph->saddr = load_balancer_ip;
+	__builtin_memcpy(eth->h_source, load_balancer_mac, ETH_ALEN);
 
-	return XDP_PASS;
+	iph->check = iph_csum(iph);
+	tcph->check = tcph_csum(tcph, iph, data_end);
+
+	bpf_printk("Redirecting packet to new IP 0x%x from IP 0x%x", 
+                bpf_ntohl(iph->daddr), 
+                bpf_ntohl(iph->saddr)
+            );
+    bpf_printk("New Dest MAC: %x:%x:%x:%x:%x:%x", eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
+    bpf_printk("New Source MAC: %x:%x:%x:%x:%x:%x\n", eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5]);
+
+	return XDP_TX;
 }

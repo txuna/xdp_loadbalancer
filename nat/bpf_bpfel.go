@@ -13,6 +13,17 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type bpfEvent struct {
+	_       structs.HostLayout
+	Kind    uint32
+	SrcMac  [6]uint8
+	DstMac  [6]uint8
+	SrcIp   uint32
+	DstIp   uint32
+	SrcPort uint16
+	DstPort uint16
+}
+
 type bpfServerConfig struct {
 	_   structs.HostLayout
 	Ip  uint32
@@ -69,7 +80,7 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	Lb      *ebpf.MapSpec `ebpf:"lb"`
+	Events  *ebpf.MapSpec `ebpf:"events"`
 	Servers *ebpf.MapSpec `ebpf:"servers"`
 }
 
@@ -77,6 +88,10 @@ type bpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
+	ClientIp        *ebpf.VariableSpec `ebpf:"client_ip"`
+	ClientMac       *ebpf.VariableSpec `ebpf:"client_mac"`
+	LoadBalancerIp  *ebpf.VariableSpec `ebpf:"load_balancer_ip"`
+	LoadBalancerMac *ebpf.VariableSpec `ebpf:"load_balancer_mac"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -99,13 +114,13 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	Lb      *ebpf.Map `ebpf:"lb"`
+	Events  *ebpf.Map `ebpf:"events"`
 	Servers *ebpf.Map `ebpf:"servers"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
-		m.Lb,
+		m.Events,
 		m.Servers,
 	)
 }
@@ -114,6 +129,10 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
+	ClientIp        *ebpf.Variable `ebpf:"client_ip"`
+	ClientMac       *ebpf.Variable `ebpf:"client_mac"`
+	LoadBalancerIp  *ebpf.Variable `ebpf:"load_balancer_ip"`
+	LoadBalancerMac *ebpf.Variable `ebpf:"load_balancer_mac"`
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.
