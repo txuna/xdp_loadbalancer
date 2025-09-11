@@ -20,9 +20,12 @@ sudo cat /sys/kernel/debug/tracing/trace_pipe
 sudo ip netns exec lb  ./xdpdump -i veth6 -x
 
 sudo ./xdpdump -D
+
+sudo ip netns exec lb ./xdpdump --rx-capture entry,exit -i veth6 -x -v -w packet.pcap
 ```
 
 ```bash
+scp -F ./ssh-config lima-default:/home/tuuna.linux/xdp_loadbalancer/xdp-tools/xdp-dump/packet.pcap .
 ```
 
 ```bash

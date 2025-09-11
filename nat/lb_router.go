@@ -16,6 +16,7 @@ type Router struct {
 	objs       bpfObjects
 	rd         *ringbuf.Reader
 	xdpProgram link.Link
+	xdpVlan    link.Link
 	iface      *net.Interface
 }
 
@@ -44,6 +45,18 @@ func NewRouter(ifaceName string) (*Router, error) {
 		router.Close()
 		return nil, err
 	}
+
+	// time.Sleep(2 * time.Second)
+
+	// router.xdpVlan, err = link.AttachXDP(link.XDPOptions{
+	// 	Program:   router.objs.XdpVlanSwapFunc,
+	// 	Interface: router.iface.Index,
+	// })
+
+	// if err != nil {
+	// 	router.Close()
+	// 	return nil, err
+	// }
 
 	servs, err := initServers()
 	if err != nil {

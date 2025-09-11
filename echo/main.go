@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"bufio"
 	"log"
 	"net"
 )
@@ -27,13 +26,21 @@ func handle(c net.Conn) {
 	defer c.Close()
 	log.Println("new connection from", c.RemoteAddr())
 
-	scanner := bufio.NewScanner(c)
-	for scanner.Scan() {
-		msg := scanner.Text()
-		fmt.Println("recv:", msg)           // 서버 콘솔에 출력
-		_, _ = fmt.Fprintln(c, msg)        // 클라이언트에 그대로 돌려줌
-	}
-	if err := scanner.Err(); err != nil {
-		log.Println("read error:", err)
+	data := make([]byte, 4096)
+	for {
+		n, err := c.Read(data)
+		if err != nil {
+			fmt.Println(err)
+			break
+		}
+
+		_ = n
+		fmt.Println("recv: ", data[:n])
+
+		_, err = c.Write([]byte("XDP IS HELL"))
+		if err != nil {
+			fmt.Println(err)
+			break
+		}
 	}
 }

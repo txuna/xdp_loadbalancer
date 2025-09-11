@@ -14,9 +14,14 @@ git clone https://github.com/zsh-users/zsh-syntax-highlighting ${ZSH_CUSTOM:-~/.
 sudo apt install net-tools pkg-config gcc make m4 libpcap-dev -y
 
 
-# install golang
-wget https://go.dev/dl/go1.25.0.linux-arm64.tar.gz
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.0.linux-arm64.tar.gz
+# install golang for arm linux
+# wget https://go.dev/dl/go1.25.0.linux-arm64.tar.gz
+# sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.0.linux-arm64.tar.gz
+# export PATH=$PATH:/usr/local/go/bin
+
+# install golang for amd linux
+wget https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
 export PATH=$PATH:/usr/local/go/bin
 
 

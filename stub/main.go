@@ -37,5 +37,5 @@ func main() {
 
 	defer xdp.Close()
 	fmt.Println("xdp stub attached!")
-	time.Sleep(1000 * time.Second)
+	time.Sleep(10000 * time.Second)
 }

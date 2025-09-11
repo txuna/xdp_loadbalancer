@@ -73,7 +73,8 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
-	XdpMain *ebpf.ProgramSpec `ebpf:"xdp_main"`
+	XdpMain         *ebpf.ProgramSpec `ebpf:"xdp_main"`
+	XdpVlanSwapFunc *ebpf.ProgramSpec `ebpf:"xdp_vlan_swap_func"`
 }
 
 // bpfMapSpecs contains maps before they are loaded into the kernel.
@@ -139,12 +140,14 @@ type bpfVariables struct {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
-	XdpMain *ebpf.Program `ebpf:"xdp_main"`
+	XdpMain         *ebpf.Program `ebpf:"xdp_main"`
+	XdpVlanSwapFunc *ebpf.Program `ebpf:"xdp_vlan_swap_func"`
 }
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
 		p.XdpMain,
+		p.XdpVlanSwapFunc,
 	)
 }
 

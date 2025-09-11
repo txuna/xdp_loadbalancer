@@ -95,10 +95,17 @@ iph_csum(struct iphdr *iph)
 {
     iph->check = 0;
     unsigned long long csum = bpf_csum_diff(0, 0, (unsigned int *)iph, sizeof(struct iphdr), 0);
+	if (csum <= 0) {
+		bpf_printk("csum is minus");
+	}
     return csum_fold_helper(csum);
 }
 
-
+SEC("xdp")
+int xdp_vlan_swap_func(struct xdp_md *ctx){
+	bpf_printk("vlan !!!!!\n");
+	return XDP_PASS;
+}
 
 SEC("xdp")
 int xdp_main(struct xdp_md *ctx) {
@@ -128,13 +135,15 @@ int xdp_main(struct xdp_md *ctx) {
 		return XDP_PASS;
 	}
 
+
 	// tcp header
 	struct tcphdr *tcph = (void*)iph + iph->ihl * 4;
 	if ((void*)tcph + sizeof(*tcph) > data_end) {
 		return XDP_PASS;
 	}
+	
 
-	// logging
+	// // logging
 	es = bpf_ringbuf_reserve(&events, sizeof(struct event), 0);
 	if (!es) {
 		return XDP_PASS;
@@ -160,6 +169,7 @@ int xdp_main(struct xdp_md *ctx) {
 		__u32 key = 0;
 		struct server_config *server = bpf_map_lookup_elem(&servers, &key);
 		if (!server) {
+			bpf_printk("no server\n");
 			return XDP_PASS;
 		}
 
@@ -177,7 +187,7 @@ int xdp_main(struct xdp_md *ctx) {
 		Source Mac = LB Mac
 		Source IP = LB IP
 	*/
-	else if (iph->saddr == bpf_ntohl(0xa000002)){
+	else{
 		// set client address and mac
 		bpf_printk("from server\n");
 		iph->daddr = client_ip;
