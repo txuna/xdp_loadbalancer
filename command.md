@@ -29,6 +29,11 @@ scp -F ./ssh-config lima-default:/home/tuuna.linux/xdp_loadbalancer/xdp-tools/xd
 ```
 
 ```bash
+sudo apt install dropwatch
+dropwatch -l kas
+
+set alertmode packet
+start
 ```
 
 ```bash

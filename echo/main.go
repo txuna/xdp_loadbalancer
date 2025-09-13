@@ -26,6 +26,13 @@ func handle(c net.Conn) {
 	defer c.Close()
 	log.Println("new connection from", c.RemoteAddr())
 
+	// time.Sleep(1 * time.Second)
+
+	// _, err := c.Write([]byte("XDP IS HELL"))
+	// _ = err
+
+	// time.Sleep(100 * time.Second)
+
 	data := make([]byte, 4096)
 	for {
 		n, err := c.Read(data)
@@ -37,7 +44,7 @@ func handle(c net.Conn) {
 		_ = n
 		fmt.Println("recv: ", data[:n])
 
-		_, err = c.Write([]byte("XDP IS HELL"))
+		_, err = c.Write([]byte("AXDP IS HELL"))
 		if err != nil {
 			fmt.Println(err)
 			break
