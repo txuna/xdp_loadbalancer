@@ -192,7 +192,7 @@ int xdp_main(struct xdp_md *ctx) {
 	__builtin_memcpy(eth->h_source, load_balancer_mac, ETH_ALEN);
 
 	iph->check = iph_csum(iph);
-	tcph->check = tcph_csum2(tcph, iph, data_end);
+	tcph->check = tcph_csum(tcph, iph, data_end);
 	// tcph->check = tcph_csum(iph, tcph, data_end);
 
 	bpf_printk("Redirecting packet to new IP 0x%x from IP 0x%x", 

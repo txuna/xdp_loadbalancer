@@ -1,3 +1,1 @@
-XDP를 이용한 로드밸런서 
-
-연습 및 개발중
+# 누가 내 TCP Packet을 DROP한거죠? (with XDP Load Balancer)
