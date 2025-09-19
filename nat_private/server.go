@@ -11,11 +11,12 @@ Client -> LB -> (Server1, Server2)
 */
 type Server struct {
 	IP   uint32 // --> u32
+	Port uint16 // --> u16
 	Mac  []byte // --> u8
 	Name string
 }
 
-func NewServer(ipStr, macStr, name string) (*Server, error) {
+func NewServer(ipStr, macStr, name string, port uint16) (*Server, error) {
 	server := &Server{
 		Name: name,
 	}
@@ -32,6 +33,7 @@ func NewServer(ipStr, macStr, name string) (*Server, error) {
 	}
 
 	server.IP = ip
+	server.Port = Ntohs(port)
 
 	mac, err := net.ParseMAC(macStr)
 	if err != nil {
@@ -41,12 +43,11 @@ func NewServer(ipStr, macStr, name string) (*Server, error) {
 
 	return server, nil
 }
-
 func initServers() ([]*Server, error) {
 	// create new server
 	servs := make([]*Server, 0)
 
-	srv, err := NewServer("10.201.0.5", "de:ad:be:ef:00:05", "Python A")
+	srv, err := NewServer("10.201.0.5", "de:ad:be:ef:00:05", "Python A", 8000)
 	if err != nil {
 		return nil, err
 	}

@@ -30,6 +30,7 @@ __u8 load_balancer_mac[ETH_ALEN] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x04};
 
 struct server_config {
 	__u32 ip;
+	__u16 port;
 	__u8 mac[ETH_ALEN];
 };
 
@@ -80,13 +81,33 @@ tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
     sum += __constant_htons(IPPROTO_TCP);
     sum += __constant_htons((__u16)(data_end - (void *)tcph));
 
+	__u32 tcp_header_len = tcph->doff * 4;
+	__u32 total_len = bpf_ntohs(iph->tot_len);
+	__u32 ip_header_len = (iph->ihl*4);
+	__u32 payload_len = total_len - ip_header_len - tcp_header_len;
+
+	__u32 tcp_len = tcp_header_len + payload_len; 
+	
+	bpf_printk("total len: %d", total_len);
+	bpf_printk("tcp header size: %d", tcp_header_len);
+	bpf_printk("real header size: %d", sizeof(*tcph)); // 차액은 옵션인듯
+	bpf_printk("tcp payload len: %d", payload_len);
+
     // TCP header and payload checksum
     #pragma clang loop unroll_count(MAX_TCP_CHECK_WORDS)
     for (int i = 0; i <= MAX_TCP_CHECK_WORDS; i++) {
         __u16 *ptr = (__u16 *)tcph + i;
-        if ((void *)ptr + 2 > data_end)
-            break;
-        sum += *(__u16 *)ptr;
+        if ((void *)ptr + 2 <= data_end){
+			sum += *(__u16 *)ptr;
+			continue;
+		}
+
+		// if ((void *)ptr + 1 == data_end) {
+		// 	// __u8 value = *(__u8 *)ptr;
+		// 	// bpf_printk("value: %d", value);
+		// }
+
+        break;
     }
 
     // fold into 16 bit
@@ -95,6 +116,74 @@ tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
 
     return ~sum;
 }
+
+////////////////////////////////////////////////////////////////////////////////
+static __always_inline __u16 csum_reduce_helper(__u32 csum)
+{
+	csum = ((csum & 0xffff0000) >> 16) + (csum & 0xffff);
+	csum = ((csum & 0xffff0000) >> 16) + (csum & 0xffff);
+
+	return csum;
+}
+
+#define MAX_OPT_WORDS 10 // 40 bytes for options
+#define MAX_TARGET_COUNT 64
+#define CHECK_OUT_OF_BOUNDS(PTR, OFFSET, END) (((void *)PTR) + OFFSET > ((void *)END))
+
+struct ipv4_psd_header
+{
+	__u32 src_addr; /* IP address of source host. */
+	__u32 dst_addr; /* IP address of destination host. */
+	__u8 zero;	   /* zero. */
+	__u8 proto;	   /* L4 protocol type. */
+	__u16 len;	   /* L4 length. */
+};
+
+static __always_inline int compute_tcp_csum(struct iphdr *ip, struct tcphdr *tcp, void *data_end)
+{
+	struct ipv4_psd_header psdh;
+	__u32 csum;
+	int ret = 0;
+
+	tcp->check = 0;
+	csum = bpf_csum_diff(0, 0, (__be32 *)tcp, sizeof(struct tcphdr), 0);
+	psdh.src_addr = ip->saddr;
+	psdh.dst_addr = ip->daddr;
+	psdh.zero = 0;
+	psdh.proto = IPPROTO_TCP;
+	psdh.len = bpf_htons(bpf_ntohs(ip->tot_len) - sizeof(struct iphdr));
+	csum = bpf_csum_diff(0, 0, (__be32 *)&psdh, sizeof(struct ipv4_psd_header),
+						 csum);
+	__u32 tcphdrlen = tcp->doff * 4;
+
+	if (tcphdrlen == sizeof(struct tcphdr))
+		goto OUT;
+
+	/* There are TCP options */
+	__u32 *opt = (__u32 *)(tcp + 1);
+	__u32 parsed = sizeof(struct tcphdr);
+	for (int i = 0; i < MAX_OPT_WORDS; i++)
+	{
+		if ((void *)(opt + 1) > data_end)
+		{
+			ret = -1;
+			goto OUT;
+		}
+
+		csum = bpf_csum_diff(0, 0, (__be32 *)opt, sizeof(__u32), csum);
+
+		parsed += sizeof(__u32);
+		if (parsed == tcphdrlen)
+			break;
+		opt++;
+	}
+
+OUT:
+	tcp->check = ~csum_reduce_helper(csum);
+	bpf_printk("calc: 0x%x", tcp->check);
+	return ret;
+}
+////////////////////////////////////////////////////////////////////////////////////
 
 static __always_inline __u16
 iph_csum(struct iphdr *iph)
@@ -198,8 +287,12 @@ int xdp_main(struct xdp_md *ctx) {
 	__builtin_memcpy(eth->h_source, load_balancer_mac, ETH_ALEN);
 
 	iph->check = iph_csum(iph);
-	tcph->check = tcph_csum(tcph, iph, data_end);
-	// tcph->check = tcph_csum(iph, tcph, data_end);
+	// tcph->check = tcph_csum(tcph, iph, data_end);
+	int ret = compute_tcp_csum(iph, tcph, data_end);
+	if(ret == -1) {
+		bpf_printk("DROP");
+		return XDP_DROP;
+	}
 
 	bpf_printk("Redirecting packet to new IP 0x%x from IP 0x%x", 
                 bpf_ntohl(iph->daddr), 

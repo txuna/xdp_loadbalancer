@@ -25,10 +25,10 @@ type bpfEvent struct {
 }
 
 type bpfServerConfig struct {
-	_   structs.HostLayout
-	Ip  uint32
-	Mac [6]uint8
-	_   [2]byte
+	_    structs.HostLayout
+	Ip   uint32
+	Port uint16
+	Mac  [6]uint8
 }
 
 // loadBpf returns the embedded CollectionSpec for bpf.
