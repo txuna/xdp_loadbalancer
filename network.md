@@ -167,6 +167,7 @@ ip netns delete netns5
 # 브릿지 생성 및 셋업
 ip link add br0 type bridge
 ip link set br0 up
+ip link set br0 address DE:AD:BE:EF:00:01
 ip addr add 10.201.0.1/24 brd 10.201.0.255 dev br0
 iptables --policy FORWARD ACCEPT
 

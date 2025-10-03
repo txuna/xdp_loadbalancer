@@ -19,10 +19,8 @@ char _license[] SEC("license") = "GPL";
 // 10.201.0.1
 int client_ip = bpf_htonl(0x0AC90001);
 
-// 92:7c:62:40:57:5b
-// 7a:b9:97:01:9c:dc
-// __u8 client_mac[ETH_ALEN] = {0x92, 0x7C, 0x62, 0x40, 0x57, 0x5B};
-__u8 client_mac[ETH_ALEN] = {0x7a, 0xb9, 0x97, 0x01, 0x9c, 0xdc};
+// de:ad:be:ef:00:01
+__u8 client_mac[ETH_ALEN] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
 
 // 10.201.0.4
 int load_balancer_ip = bpf_htonl(0x0AC90004);
@@ -75,8 +73,6 @@ struct ipv4_psd_header
 	u16 len;	   /* L4 length. */
 };
 
-
-
 static __always_inline __u16 csum_reduce_helper(__u32 csum)
 {
 	csum = ((csum & 0xffff0000) >> 16) + (csum & 0xffff);
@@ -106,6 +102,7 @@ static __always_inline int compute_tcp_csum(struct iphdr *ip, struct tcphdr *tcp
 	psdh.zero = 0;
 	psdh.proto = IPPROTO_TCP;
 	psdh.len = bpf_htons(bpf_ntohs(ip->tot_len) - sizeof(struct iphdr));
+	// psdh.len = bpf_ntohs(ip->tot_len) - (ip->ihl*4);
 	csum = bpf_csum_diff(0, 0, (__be32 *)&psdh, sizeof(struct ipv4_psd_header),
 						 csum);
 	u32 tcphdrlen = tcp->doff * 4;
@@ -134,6 +131,7 @@ static __always_inline int compute_tcp_csum(struct iphdr *ip, struct tcphdr *tcp
 
 OUT:
 	tcp->check = ~csum_reduce_helper(csum);
+	// tcp->check = csum_fold_helper(csum);
 	return ret;
 }
 
@@ -303,11 +301,7 @@ int xdp_main(struct xdp_md *ctx) {
 
 	iph->check = iph_csum(iph);
 	// tcph->check = tcph_csum(tcph, iph, data_end);
-	int ret = compute_tcp_csum(iph, tcph, data_end);
-	if(ret == -1) {
-		bpf_printk("DROP");
-		return XDP_DROP;
-	}
+	compute_tcp_csum(iph, tcph, data_end);
 
 	bpf_printk("Redirecting packet to new IP 0x%x from IP 0x%x", 
                 bpf_ntohl(iph->daddr), 
