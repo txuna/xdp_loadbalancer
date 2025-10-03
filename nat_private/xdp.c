@@ -20,7 +20,9 @@ char _license[] SEC("license") = "GPL";
 int client_ip = bpf_htonl(0x0AC90001);
 
 // 92:7c:62:40:57:5b
-__u8 client_mac[ETH_ALEN] = {0x92, 0x7C, 0x62, 0x40, 0x57, 0x5B};
+// 7a:b9:97:01:9c:dc
+// __u8 client_mac[ETH_ALEN] = {0x92, 0x7C, 0x62, 0x40, 0x57, 0x5B};
+__u8 client_mac[ETH_ALEN] = {0x7a, 0xb9, 0x97, 0x01, 0x9c, 0xdc};
 
 // 10.201.0.4
 int load_balancer_ip = bpf_htonl(0x0AC90004);
@@ -56,6 +58,87 @@ struct {
 	__type(value, struct event);
 } events SEC(".maps");
 
+///
+// CALC TCP CHECKSUM
+
+#define MAX_OPT_WORDS 10 // 40 bytes for options
+#define MAX_TARGET_COUNT 64
+#define CHECK_OUT_OF_BOUNDS(PTR, OFFSET, END) (((void *)PTR) + OFFSET > ((void *)END))
+
+
+struct ipv4_psd_header
+{
+	u32 src_addr; /* IP address of source host. */
+	u32 dst_addr; /* IP address of destination host. */
+	u8 zero;	   /* zero. */
+	u8 proto;	   /* L4 protocol type. */
+	u16 len;	   /* L4 length. */
+};
+
+
+
+static __always_inline __u16 csum_reduce_helper(__u32 csum)
+{
+	csum = ((csum & 0xffff0000) >> 16) + (csum & 0xffff);
+	csum = ((csum & 0xffff0000) >> 16) + (csum & 0xffff);
+
+	return csum;
+}
+
+struct tcp_pseudo_header{
+	__u32 src_ip;
+	__u32 dst_ip; 
+	__u8 resv;
+	__u8 protocol; 
+	__u16 tcp_len;
+};
+
+static __always_inline int compute_tcp_csum(struct iphdr *ip, struct tcphdr *tcp, void *data_end)
+{
+	struct ipv4_psd_header psdh;
+	u32 csum;
+	int ret = 0;
+
+	tcp->check = 0;
+	csum = bpf_csum_diff(0, 0, (__be32 *)tcp, sizeof(struct tcphdr), 0);
+	psdh.src_addr = ip->saddr;
+	psdh.dst_addr = ip->daddr;
+	psdh.zero = 0;
+	psdh.proto = IPPROTO_TCP;
+	psdh.len = bpf_htons(bpf_ntohs(ip->tot_len) - sizeof(struct iphdr));
+	csum = bpf_csum_diff(0, 0, (__be32 *)&psdh, sizeof(struct ipv4_psd_header),
+						 csum);
+	u32 tcphdrlen = tcp->doff * 4;
+
+	if (tcphdrlen == sizeof(struct tcphdr))
+		goto OUT;
+
+	/* There are TCP options */
+	u32 *opt = (u32 *)(tcp + 1);
+	u32 parsed = sizeof(struct tcphdr);
+	for (int i = 0; i < MAX_OPT_WORDS; i++)
+	{
+		if ((void *)(opt + 1) > data_end)
+		{
+			ret = -1;
+			goto OUT;
+		}
+
+		csum = bpf_csum_diff(0, 0, (__be32 *)opt, sizeof(u32), csum);
+
+		parsed += sizeof(u32);
+		if (parsed == tcphdrlen)
+			break;
+		opt++;
+	}
+
+OUT:
+	tcp->check = ~csum_reduce_helper(csum);
+	return ret;
+}
+
+///
+
 static __always_inline __u16
 csum_fold_helper(__u64 csum)
 {
@@ -90,7 +173,7 @@ tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
 	
 	bpf_printk("total len: %d", total_len);
 	bpf_printk("tcp header size: %d", tcp_header_len);
-	bpf_printk("real header size: %d", sizeof(*tcph)); // 차액은 옵션인듯
+	bpf_printk("real header size: %d", sizeof(*tcph));
 	bpf_printk("tcp payload len: %d", payload_len);
 
     // TCP header and payload checksum
@@ -116,74 +199,6 @@ tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
 
     return ~sum;
 }
-
-////////////////////////////////////////////////////////////////////////////////
-static __always_inline __u16 csum_reduce_helper(__u32 csum)
-{
-	csum = ((csum & 0xffff0000) >> 16) + (csum & 0xffff);
-	csum = ((csum & 0xffff0000) >> 16) + (csum & 0xffff);
-
-	return csum;
-}
-
-#define MAX_OPT_WORDS 10 // 40 bytes for options
-#define MAX_TARGET_COUNT 64
-#define CHECK_OUT_OF_BOUNDS(PTR, OFFSET, END) (((void *)PTR) + OFFSET > ((void *)END))
-
-struct ipv4_psd_header
-{
-	__u32 src_addr; /* IP address of source host. */
-	__u32 dst_addr; /* IP address of destination host. */
-	__u8 zero;	   /* zero. */
-	__u8 proto;	   /* L4 protocol type. */
-	__u16 len;	   /* L4 length. */
-};
-
-static __always_inline int compute_tcp_csum(struct iphdr *ip, struct tcphdr *tcp, void *data_end)
-{
-	struct ipv4_psd_header psdh;
-	__u32 csum;
-	int ret = 0;
-
-	tcp->check = 0;
-	csum = bpf_csum_diff(0, 0, (__be32 *)tcp, sizeof(struct tcphdr), 0);
-	psdh.src_addr = ip->saddr;
-	psdh.dst_addr = ip->daddr;
-	psdh.zero = 0;
-	psdh.proto = IPPROTO_TCP;
-	psdh.len = bpf_htons(bpf_ntohs(ip->tot_len) - sizeof(struct iphdr));
-	csum = bpf_csum_diff(0, 0, (__be32 *)&psdh, sizeof(struct ipv4_psd_header),
-						 csum);
-	__u32 tcphdrlen = tcp->doff * 4;
-
-	if (tcphdrlen == sizeof(struct tcphdr))
-		goto OUT;
-
-	/* There are TCP options */
-	__u32 *opt = (__u32 *)(tcp + 1);
-	__u32 parsed = sizeof(struct tcphdr);
-	for (int i = 0; i < MAX_OPT_WORDS; i++)
-	{
-		if ((void *)(opt + 1) > data_end)
-		{
-			ret = -1;
-			goto OUT;
-		}
-
-		csum = bpf_csum_diff(0, 0, (__be32 *)opt, sizeof(__u32), csum);
-
-		parsed += sizeof(__u32);
-		if (parsed == tcphdrlen)
-			break;
-		opt++;
-	}
-
-OUT:
-	tcp->check = ~csum_reduce_helper(csum);
-	bpf_printk("calc: 0x%x", tcp->check);
-	return ret;
-}
-////////////////////////////////////////////////////////////////////////////////////
 
 static __always_inline __u16
 iph_csum(struct iphdr *iph)
