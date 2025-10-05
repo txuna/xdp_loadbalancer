@@ -152,16 +152,7 @@ csum_fold_helper(__u64 csum)
 static __always_inline __u16
 tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
 {
-    // Clear checksum
-    tcph->check = 0;
-
-    // Pseudo header checksum calculation
-    __u32 sum = 0;
-    sum += (__u16)(iph->saddr >> 16) + (__u16)(iph->saddr & 0xFFFF);
-    sum += (__u16)(iph->daddr >> 16) + (__u16)(iph->daddr & 0xFFFF);
-    sum += __constant_htons(IPPROTO_TCP);
-    sum += __constant_htons((__u16)(data_end - (void *)tcph));
-
+	// debug
 	__u32 tcp_header_len = tcph->doff * 4;
 	__u32 total_len = bpf_ntohs(iph->tot_len);
 	__u32 ip_header_len = (iph->ihl*4);
@@ -170,28 +161,63 @@ tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
 	__u32 tcp_len = tcp_header_len + payload_len; 
 	
 	bpf_printk("total len: %d", total_len);
+	bpf_printk("ip header len: %d", ip_header_len);
 	bpf_printk("tcp header size: %d", tcp_header_len);
 	bpf_printk("real header size: %d", sizeof(*tcph));
 	bpf_printk("tcp payload len: %d", payload_len);
 
+    // Clear checksum
+    tcph->check = 0;
+
+    // Pseudo header checksum calculation
+    __u32 sum = 0;
+    sum += (__u16)(iph->saddr >> 16) + (__u16)(iph->saddr & 0xFFFF);
+    sum += (__u16)(iph->daddr >> 16) + (__u16)(iph->daddr & 0xFFFF);
+    sum += __constant_htons(IPPROTO_TCP);
+    // sum += __constant_htons((__u16)(data_end - (void *)tcph));
+	sum += __constant_htons(tcp_len);
+
     // TCP header and payload checksum
-    #pragma clang loop unroll_count(MAX_TCP_CHECK_WORDS)
-    for (int i = 0; i <= MAX_TCP_CHECK_WORDS; i++) {
-        __u16 *ptr = (__u16 *)tcph + i;
-        if ((void *)ptr + 2 <= data_end){
-			sum += *(__u16 *)ptr;
-			continue;
+    // #pragma clang loop unroll_count(MAX_TCP_CHECK_WORDS)
+    // for (int i = 0; i <= MAX_TCP_CHECK_WORDS; i++) {
+    //     __u16 *ptr = (__u16 *)tcph + i;
+    //     if ((void *)ptr + 2 <= data_end){
+	// 		sum += *(__u16 *)ptr;
+	// 		continue;
+	// 	}
+
+	// 	if ((void *)ptr + 1 == data_end) {
+	// 		bpf_printk("ODD");
+	// 		// __u8 value = *(__u8 *)ptr;
+	// 		// bpf_printk("value: %d", value);
+	// 	}
+
+    //     break;
+    // }
+
+	// renew 
+	int i = 0;
+	__u16 *tmp = (__u16*)tcph; 
+	__u16 cc = 0;
+	#pragma clang loop unroll_count(MAX_TCP_CHECK_WORDS)
+	for (i = 0; i < MAX_TCP_CHECK_WORDS; i+=1) {
+		if (i >= tcp_len) {
+			break;
 		}
-
-		// if ((void *)ptr + 1 == data_end) {
-		// 	// __u8 value = *(__u8 *)ptr;
-		// 	// bpf_printk("value: %d", value);
+		cc += *tmp;
+		// if ((void*)(tmp + 1) >= data_end) {
+		// 	break;
 		// }
+		tmp = tmp + 1;
+	}
 
-        break;
-    }
+	// ODD byte
+	// if (i + 1 == tcp_len) {
+	// 	cc += (*tmp+i);
+	// }
 
     // fold into 16 bit
+	sum += cc;
     while (sum >> 16)
         sum = (sum & 0xFFFF) + (sum >> 16);
 
@@ -300,8 +326,8 @@ int xdp_main(struct xdp_md *ctx) {
 	__builtin_memcpy(eth->h_source, load_balancer_mac, ETH_ALEN);
 
 	iph->check = iph_csum(iph);
-	// tcph->check = tcph_csum(tcph, iph, data_end);
-	compute_tcp_csum(iph, tcph, data_end);
+	tcph->check = tcph_csum(tcph, iph, data_end);
+	// compute_tcp_csum(iph, tcph, data_end);
 
 	bpf_printk("Redirecting packet to new IP 0x%x from IP 0x%x", 
                 bpf_ntohl(iph->daddr), 
