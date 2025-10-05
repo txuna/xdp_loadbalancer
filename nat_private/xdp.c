@@ -120,13 +120,19 @@ tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
 			continue;
 		}
 
-		// ptr + 1 == data_end 했을때는 안된 이유는??
+		// ptr + 1 == data_end 했을때는 안된 이유는?? 무조건 <=이나 >로 조건 검사해야하나 ?
 		if ((void *)ptr + 1 <= data_end) {
-			bpf_printk("ODD");
 			__u8 value = *(__u8 *)ptr;
 			sum += value & bpf_htons(0xFF00);
-			bpf_printk("value: %d", value);
 		}
+
+		// https://docs.kernel.org/bpf/verifier.html?utm_source=chatgpt.com#direct-packet-access
+		// 해당 조건이 옳아도 bpf 검증기에서 아래 조건과 ptr 접근이 관련이 없어서 검증되지않았다고 판단하는건가? 커널 소스 분석좀 해야겠다.
+		// if ((void*)ptr + 1 == data_end){
+		// 	// *ptr blah blah
+		// 	__u8 value = *(__u8 *)ptr;
+		// 	sum += value & bpf_htons(0xFF00);
+		// }
 
         break;
     }
