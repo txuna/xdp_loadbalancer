@@ -63,16 +63,6 @@ struct {
 #define MAX_TARGET_COUNT 64
 #define CHECK_OUT_OF_BOUNDS(PTR, OFFSET, END) (((void *)PTR) + OFFSET > ((void *)END))
 
-
-struct ipv4_psd_header
-{
-	u32 src_addr; /* IP address of source host. */
-	u32 dst_addr; /* IP address of destination host. */
-	u8 zero;	   /* zero. */
-	u8 proto;	   /* L4 protocol type. */
-	u16 len;	   /* L4 length. */
-};
-
 static __always_inline __u16 csum_reduce_helper(__u32 csum)
 {
 	csum = ((csum & 0xffff0000) >> 16) + (csum & 0xffff);
@@ -80,62 +70,6 @@ static __always_inline __u16 csum_reduce_helper(__u32 csum)
 
 	return csum;
 }
-
-struct tcp_pseudo_header{
-	__u32 src_ip;
-	__u32 dst_ip; 
-	__u8 resv;
-	__u8 protocol; 
-	__u16 tcp_len;
-};
-
-static __always_inline int compute_tcp_csum(struct iphdr *ip, struct tcphdr *tcp, void *data_end)
-{
-	struct ipv4_psd_header psdh;
-	u32 csum;
-	int ret = 0;
-
-	tcp->check = 0;
-	csum = bpf_csum_diff(0, 0, (__be32 *)tcp, sizeof(struct tcphdr), 0);
-	psdh.src_addr = ip->saddr;
-	psdh.dst_addr = ip->daddr;
-	psdh.zero = 0;
-	psdh.proto = IPPROTO_TCP;
-	psdh.len = bpf_htons(bpf_ntohs(ip->tot_len) - sizeof(struct iphdr));
-	// psdh.len = bpf_ntohs(ip->tot_len) - (ip->ihl*4);
-	csum = bpf_csum_diff(0, 0, (__be32 *)&psdh, sizeof(struct ipv4_psd_header),
-						 csum);
-	u32 tcphdrlen = tcp->doff * 4;
-
-	if (tcphdrlen == sizeof(struct tcphdr))
-		goto OUT;
-
-	/* There are TCP options */
-	u32 *opt = (u32 *)(tcp + 1);
-	u32 parsed = sizeof(struct tcphdr);
-	for (int i = 0; i < MAX_OPT_WORDS; i++)
-	{
-		if ((void *)(opt + 1) > data_end)
-		{
-			ret = -1;
-			goto OUT;
-		}
-
-		csum = bpf_csum_diff(0, 0, (__be32 *)opt, sizeof(u32), csum);
-
-		parsed += sizeof(u32);
-		if (parsed == tcphdrlen)
-			break;
-		opt++;
-	}
-
-OUT:
-	tcp->check = ~csum_reduce_helper(csum);
-	// tcp->check = csum_fold_helper(csum);
-	return ret;
-}
-
-///
 
 static __always_inline __u16
 csum_fold_helper(__u64 csum)
@@ -149,7 +83,7 @@ csum_fold_helper(__u64 csum)
     return ~csum;
 }
 
-static __always_inline __u16
+static __always_inline int
 tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
 {
 	// debug
@@ -163,7 +97,7 @@ tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
 	bpf_printk("total len: %d", total_len);
 	bpf_printk("ip header len: %d", ip_header_len);
 	bpf_printk("tcp header size: %d", tcp_header_len);
-	bpf_printk("real header size: %d", sizeof(*tcph));
+	// bpf_printk("real header size: %d", sizeof(*tcph));
 	bpf_printk("tcp payload len: %d", payload_len);
 
     // Clear checksum
@@ -173,55 +107,33 @@ tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
     __u32 sum = 0;
     sum += (__u16)(iph->saddr >> 16) + (__u16)(iph->saddr & 0xFFFF);
     sum += (__u16)(iph->daddr >> 16) + (__u16)(iph->daddr & 0xFFFF);
-    sum += __constant_htons(IPPROTO_TCP);
-    // sum += __constant_htons((__u16)(data_end - (void *)tcph));
-	sum += __constant_htons(tcp_len);
+    sum += bpf_htons(IPPROTO_TCP);
+    // sum += bpf_htons((__u16)(data_end - (void *)tcph));
+	sum += bpf_htons(tcp_len);
 
     // TCP header and payload checksum
-    // #pragma clang loop unroll_count(MAX_TCP_CHECK_WORDS)
-    // for (int i = 0; i <= MAX_TCP_CHECK_WORDS; i++) {
-    //     __u16 *ptr = (__u16 *)tcph + i;
-    //     if ((void *)ptr + 2 <= data_end){
-	// 		sum += *(__u16 *)ptr;
-	// 		continue;
-	// 	}
-
-	// 	if ((void *)ptr + 1 == data_end) {
-	// 		bpf_printk("ODD");
-	// 		// __u8 value = *(__u8 *)ptr;
-	// 		// bpf_printk("value: %d", value);
-	// 	}
-
-    //     break;
-    // }
-
-	// renew 
-	int i = 0;
-	__u16 *tmp = (__u16*)tcph; 
-	__u16 cc = 0;
-	#pragma clang loop unroll_count(MAX_TCP_CHECK_WORDS)
-	for (i = 0; i < MAX_TCP_CHECK_WORDS; i+=1) {
-		if (i >= tcp_len) {
-			break;
+    #pragma clang loop unroll_count(MAX_TCP_CHECK_WORDS)
+    for (int i = 0; i <= MAX_TCP_CHECK_WORDS; i++) {
+        __u16 *ptr = (__u16 *)tcph + i;
+        if ((void *)ptr + 2 <= data_end){
+			sum += *(__u16 *)ptr;
+			continue;
 		}
-		cc += *tmp;
-		// if ((void*)(tmp + 1) >= data_end) {
-		// 	break;
-		// }
-		tmp = tmp + 1;
-	}
 
-	// ODD byte
-	// if (i + 1 == tcp_len) {
-	// 	cc += (*tmp+i);
-	// }
+		// ptr + 1 == data_end 했을때는 안된 이유는??
+		if ((void *)ptr + 1 <= data_end) {
+			bpf_printk("ODD");
+			__u8 value = *(__u8 *)ptr;
+			sum += value & bpf_htons(0xFF00);
+			bpf_printk("value: %d", value);
+		}
 
-    // fold into 16 bit
-	sum += cc;
-    while (sum >> 16)
-        sum = (sum & 0xFFFF) + (sum >> 16);
+        break;
+    }
 
-    return ~sum;
+	sum = ~csum_reduce_helper(sum);
+	tcph->check = (unsigned short)sum;
+	return 0;
 }
 
 static __always_inline __u16
@@ -326,8 +238,12 @@ int xdp_main(struct xdp_md *ctx) {
 	__builtin_memcpy(eth->h_source, load_balancer_mac, ETH_ALEN);
 
 	iph->check = iph_csum(iph);
-	tcph->check = tcph_csum(tcph, iph, data_end);
-	// compute_tcp_csum(iph, tcph, data_end);
+	// tcph->check = tcph_csum(tcph, iph, data_end);
+	int ret; 
+	ret = tcph_csum(tcph, iph, data_end);
+	if(ret == -1) {
+		return XDP_DROP;
+	}
 
 	bpf_printk("Redirecting packet to new IP 0x%x from IP 0x%x", 
                 bpf_ntohl(iph->daddr), 
