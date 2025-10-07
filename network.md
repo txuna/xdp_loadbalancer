@@ -213,6 +213,20 @@ ip link set brid6 master br0
 ip link set dev brid6 up
 ip netns exec container6 ip route add default via 10.201.0.1
 
+# client1 네트워크 네임스페이스 셋업
+ip netns add client1
+ip link add brid7 type veth peer name veth7
+ip link set veth7 netns client1
+ip netns exec client1 ip a add 10.201.0.10/24 dev veth7
+
+ip netns exec client1 ip link set veth7 address DE:AD:BE:EF:00:0A
+
+ip netns exec client1 ip link set dev lo up
+ip netns exec client1 ip link set dev veth7 up
+ip link set brid7 master br0
+ip link set dev brid7 up
+ip netns exec client1 ip route add default via 10.201.0.1
+
 # NAT 및 DNS 셋업
 sysctl -w net.ipv4.ip_forward=1
 iptables -t nat -A POSTROUTING -s 10.201.0.0/24 -j MASQUERADE
@@ -225,6 +239,9 @@ echo 'nameserver 8.8.8.8' > /etc/netns/container5/resolv.conf
 
 mkdir -p /etc/netns/container6/
 echo 'nameserver 8.8.8.8' > /etc/netns/container6/resolv.conf
+
+mkdir -p /etc/netns/client1/
+echo 'nameserver 8.8.8.8' > /etc/netns/client1/resolv.conf
 ```
 
 ### clean
@@ -232,6 +249,7 @@ echo 'nameserver 8.8.8.8' > /etc/netns/container6/resolv.conf
 ip netns delete container4
 ip netns delete container5
 ip netns delete container6
+ip netns delete client1
 ip link delete br0 
 ```
 
