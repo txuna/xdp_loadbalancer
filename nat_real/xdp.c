@@ -330,9 +330,6 @@ static __always_inline int process_from_client(struct ethhdr *eth, struct iphdr 
 // 	return;
 // }
 
-// server측도 업데이트?
-// key: client:10.201.0.1, client:port - lb:10.201.0.4, lb:8000
-// key: server:ip, server:8000 - lb:10.201.0.4, lb:port
 static __always_inline int process_from_server(struct ethhdr *eth, struct iphdr *iph, struct tcphdr *tcph, void *data_end) {
 	// 서버가 설정한 목적지 포트를 키로 지정한다. 
 	__u32 port_num = tcph->dest;
