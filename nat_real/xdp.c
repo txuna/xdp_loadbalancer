@@ -10,21 +10,44 @@
 
 // #include "bpf_endian.h"
 #include "common.h"
+#include "xx_hash.h"
+
+/*
+	최종적으로 docker container까지 연결
+*/
 
 #define SERVER_NUM 2
 #define MAX_TCP_CHECK_WORDS 750 // max 1500 bytes to check in TCP checksum. This is MTU dependent
 
+#define CLIENT 1
+#define SERVER 2
+
+#define MAX_SESSION 10000
+
+// TCP STATE
+enum {
+	TCP_ESTABLISHED = 1,
+	TCP_SYN_SENT,
+	TCP_SYN_RECV,
+	TCP_FIN_WAIT1,
+	TCP_FIN_WAIT2,
+	TCP_TIME_WAIT,
+	TCP_CLOSE,
+	TCP_CLOSE_WAIT,
+	TCP_LAST_ACK,
+	TCP_LISTEN,
+	TCP_CLOSING,	/* Now a valid state */
+	TCP_NEW_SYN_RECV,
+	TCP_BOUND_INACTIVE, /* Pseudo-state for inet_diag */
+
+	TCP_MAX_STATES	/* Leave at the end! */
+};
+
+
 char _license[] SEC("license") = "GPL";
-
-// 10.201.0.1
-int client_ip = bpf_htonl(0x0AC90001);
-
-// de:ad:be:ef:00:01
-__u8 client_mac[ETH_ALEN] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
 
 // 10.201.0.4
 int load_balancer_ip = bpf_htonl(0x0AC90004);
-
 // de:ad:be:ef:00:04
 __u8 load_balancer_mac[ETH_ALEN] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x04};
 
@@ -41,6 +64,27 @@ struct {
 	__type(value, struct server_config);
 } servers SEC(".maps");
 
+// LB에서 사용하는 source port는 30000~40000으로 제한 그 이상 요청은 XDP_DROP
+struct session{
+	__u32 client_ip;
+	__u16 client_port;
+	__u32 server_ip; 
+	__u16 server_port;
+	__u8 reserve;
+	__u8 used; 
+	__u16 lb_port;
+
+	__u8 client_mac[ETH_ALEN];
+	__u8 server_mac[ETH_ALEN];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH); 
+	__uint(max_entries, MAX_SESSION);
+	__type(key, __u32);
+	__type(value, struct session);
+} session_map SEC(".maps");
+
 struct event {
 	__u32 kind;
 	__u8 src_mac[ETH_ALEN];
@@ -49,6 +93,7 @@ struct event {
 	__u32 dst_ip; 
 	__u16 src_port;
 	__u16 dst_port;
+	__u8 state;
 };
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -56,12 +101,40 @@ struct {
 	__type(value, struct event);
 } events SEC(".maps");
 
-///
-// CALC TCP CHECKSUM
-
 #define MAX_OPT_WORDS 10 // 40 bytes for options
 #define MAX_TARGET_COUNT 64
 #define CHECK_OUT_OF_BOUNDS(PTR, OFFSET, END) (((void *)PTR) + OFFSET > ((void *)END))
+
+// get hash sip, dip 위치가 달라도 같은 hash가 나오게는 할 수 없남
+static __always_inline __u32 get_hash(struct iphdr *iph, struct tcphdr *tcph) {
+		struct {
+		__u32 src_ip;
+		__u32 dst_ip;
+		__u16 src_port;
+		__u16 dst_port;
+	} four_tuple = {iph->saddr,
+					iph->daddr,
+					bpf_ntohs(tcph->source),
+					bpf_ntohs(tcph->dest)
+                    };
+
+	return xxhash32((const char *)&four_tuple, sizeof(four_tuple), 0);
+}
+
+// get hash sip, dip 위치가 달라도 같은 hash가 나오게는 할 수 없남
+static __always_inline __u32 get_two_hash(__u32 ip, __u16 port) {
+		struct {
+		__u32 ip;
+		__u16 port;
+	} two_tuple = {ip, bpf_ntohs(port)};
+
+	return xxhash32((const char *)&two_tuple, sizeof(two_tuple), 0);
+}
+
+
+static __always_inline __u32 get_key(__u32 hash) {
+	return hash % SERVER_NUM;
+}
 
 static __always_inline __u16 csum_reduce_helper(__u32 csum)
 {
@@ -71,8 +144,7 @@ static __always_inline __u16 csum_reduce_helper(__u32 csum)
 	return csum;
 }
 
-static __always_inline __u16
-csum_fold_helper(__u64 csum)
+static __always_inline __u16 csum_fold_helper(__u64 csum)
 {
     int i;
     for (i = 0; i < 4; i++)
@@ -83,8 +155,7 @@ csum_fold_helper(__u64 csum)
     return ~csum;
 }
 
-static __always_inline int
-tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
+static __always_inline __u16 tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
 {
 	// debug
 	__u32 tcp_header_len = tcph->doff * 4;
@@ -94,11 +165,10 @@ tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
 
 	__u32 tcp_len = tcp_header_len + payload_len; 
 	
-	bpf_printk("total len: %d", total_len);
-	bpf_printk("ip header len: %d", ip_header_len);
-	bpf_printk("tcp header size: %d", tcp_header_len);
-	// bpf_printk("real header size: %d", sizeof(*tcph));
-	bpf_printk("tcp payload len: %d", payload_len);
+	// bpf_printk("total len: %d", total_len);
+	// bpf_printk("ip header len: %d", ip_header_len);
+	// bpf_printk("tcp header size: %d", tcp_header_len);
+	// bpf_printk("tcp payload len: %d", payload_len);
 
     // Clear checksum
     tcph->check = 0;
@@ -138,12 +208,10 @@ tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
     }
 
 	sum = ~csum_reduce_helper(sum);
-	tcph->check = (unsigned short)sum;
-	return 0;
+	return (__u16)sum;
 }
 
-static __always_inline __u16
-iph_csum(struct iphdr *iph)
+static __always_inline __u16 iph_csum(struct iphdr *iph)
 {
     iph->check = 0;
     unsigned long long csum = bpf_csum_diff(0, 0, (unsigned int *)iph, sizeof(struct iphdr), 0);
@@ -153,13 +221,160 @@ iph_csum(struct iphdr *iph)
     return csum_fold_helper(csum);
 }
 
+// key: client:10.201.0.1, client:port - lb:10.201.0.4, lb:8000
+static __always_inline int process_from_client(struct ethhdr *eth, struct iphdr *iph, struct tcphdr *tcph, void *data_end) {
+	__u32 hash = get_two_hash(iph->saddr, tcph->source);
+	__u32 port_num = (hash % 1000) + 30000;
+	__u32 server_key = hash % SERVER_NUM;
+
+	struct session *ss; 
+	struct server_config *server;
+
+	// 첫 연결 - 포트 여유분 확인 없다면 패킷 DROP
+	if(tcph->syn) {
+		ss = bpf_map_lookup_elem(&session_map, &port_num);
+		// 이미 있다면 (점유로 의심)
+		if(ss != NULL && ss->used) {
+			bpf_printk("[client] [0x%x:%d] already used lb port: %d, will be drop", iph->saddr, tcph->source, port_num);
+			return XDP_DROP;
+		}
+
+		server = bpf_map_lookup_elem(&servers, &server_key);
+		if(server == NULL) {
+			return XDP_DROP;
+		}
+
+		struct session ss = {
+			.client_ip = iph->saddr,
+			.client_port = tcph->source,
+			.server_ip = server->ip, 
+			.server_port = server->port,
+			.lb_port = port_num,
+			.used = 1,
+		};
+
+		__builtin_memcpy(&ss.client_mac, eth->h_source, ETH_ALEN);
+		__builtin_memcpy(&ss.server_mac, server->mac, ETH_ALEN);
+
+		bpf_map_update_elem(&session_map, &port_num, &ss, BPF_NOEXIST);
+
+		bpf_printk("[client] [0x%x:%d] new client assigned lb port: %d and server: 0x%x:%d", iph->saddr, tcph->source, port_num, server->ip, server->port);
+	}
+
+	ss = bpf_map_lookup_elem(&session_map, &port_num);
+	if (ss == NULL){
+		return XDP_DROP;
+	}
+
+	bpf_printk("[client] [0x%x:%d] redirect to 0x%x:%d, lb port: %d", ss->client_ip, ss->client_port, ss->server_ip, ss->server_port, ss->lb_port);
+	
+	__builtin_memcpy(eth->h_dest, ss->server_mac, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, load_balancer_mac, ETH_ALEN);
+
+	iph->saddr = load_balancer_ip;
+	iph->daddr = ss->server_ip;
+
+	/*
+		단일 클라이언트가 아닌 여러개의 클라이언트 컨테이너가 존재한다고 가정했을 때
+		172.17.0.2:30000, 172.17.0.3:30000 포트가 겹칠 수 있음. 물론 IP로 구별이 되겠지만 세션 정보를 포트넘버를 키로 하고 있음
+		그렇기에 LB단에서 포트 배정으로 진행 (포트 배정은 곧 커넥션 추가)
+		서버측에서 넘어갈때 다시 클라이언트 소스 포트로 변경 필요
+	*/
+	tcph->source = ss->lb_port;
+
+	// 체크섬 계산
+	iph->check = iph_csum(iph);
+	tcph->check = tcph_csum(tcph, iph, data_end);
+
+	return XDP_TX;
+}
+
+// static __always_inline void process_tcp_state(struct tcphdr *tcph, struct session *ss, __u32 hash) {
+// 	switch (ss->state) {
+// 		case TCP_CLOSE:
+// 			if (tcph->syn) {
+// 				ss->state = TCP_SYN_SENT;
+// 			}
+// 			break;
+
+// 		case TCP_SYN_SENT:
+// 			if(tcph->ack) {
+// 				ss->state = TCP_ESTABLISHED;
+// 			}
+// 			break;
+
+// 		case TCP_ESTABLISHED:
+// 			if(tcph->fin) {
+// 				ss->state = TCP_FIN_WAIT1;
+// 			}
+// 			break;
+		
+// 		case TCP_FIN_WAIT1:
+// 			break;
+
+// 		case TCP_FIN_WAIT2:
+// 			break;
+
+// 		default:
+// 			bpf_printk("unknown state: %d", ss->state);
+// 	}
+
+// 	// client, server측으로부터 update시도됨. 해당 객체가 있다면 업데이트
+// 	bpf_map_update_elem(&sessions, hash, ss, BPF_EXIST);
+// 	return;
+	
+
+// // 객체 목록에서 지워야 할 때 FIN or RST segment
+// delete:
+// 	bpf_map_delete_elem(&sessions, hash);
+// 	return;
+// }
+
+// server측도 업데이트?
+// key: client:10.201.0.1, client:port - lb:10.201.0.4, lb:8000
+// key: server:ip, server:8000 - lb:10.201.0.4, lb:port
+static __always_inline int process_from_server(struct ethhdr *eth, struct iphdr *iph, struct tcphdr *tcph, void *data_end) {
+	// 서버가 설정한 목적지 포트를 키로 지정한다. 
+	__u32 port_num = tcph->dest;
+	
+	struct session *ss = bpf_map_lookup_elem(&session_map, &port_num);
+	if (ss == NULL) {
+		return XDP_DROP;
+	}
+
+	bpf_printk("[server] [0x%x:%d] redirect to 0x%x:%d, lb port: %d", ss->server_ip, ss->server_port, ss->client_ip, ss->client_port, ss->lb_port);
+
+	__builtin_memcpy(eth->h_dest, ss->client_mac, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, load_balancer_mac, ETH_ALEN);
+
+	iph->saddr = load_balancer_ip;
+	iph->daddr = ss->client_ip;
+	tcph->dest = ss->client_port;
+
+	// 체크섬 계산
+	iph->check = iph_csum(iph);
+	tcph->check = tcph_csum(tcph, iph, data_end);
+
+	return XDP_TX;
+}
+
+static __always_inline int process_packet(struct ethhdr *eth, struct iphdr *iph, struct tcphdr *tcph, void *data_end) {
+	if (tcph->dest == bpf_htons(8000)) {
+		return process_from_client(eth, iph, tcph, data_end);
+	}
+
+	if (tcph->source == bpf_htons(8000)) {
+		return process_from_server(eth, iph, tcph, data_end);
+	}
+
+	return XDP_PASS;
+}
+
 SEC("xdp")
 int xdp_main(struct xdp_md *ctx) {
 	void *data_end = (void*)(long)ctx->data_end;
 	void *data = (void*)(long)ctx->data;
 	struct event *es;
-
-	// bpf_printk("xdp loadbalancer received packet!"); 
 
 	struct ethhdr *eth = data;
 	if ((void*)(eth + 1) > data_end) {
@@ -181,15 +396,12 @@ int xdp_main(struct xdp_md *ctx) {
 		return XDP_PASS;
 	}
 
-
 	// tcp header
 	struct tcphdr *tcph = (void*)iph + iph->ihl * 4;
 	if ((void*)tcph + sizeof(*tcph) > data_end) {
 		return XDP_PASS;
 	}
-	
 
-	// // logging
 	es = bpf_ringbuf_reserve(&events, sizeof(struct event), 0);
 	if (!es) {
 		return XDP_PASS;
@@ -201,62 +413,5 @@ int xdp_main(struct xdp_md *ctx) {
 	es->dst_port = tcph->dest;
 	bpf_ringbuf_submit(es, 0);
 
-	/*
-	
-		Client -> Load Balanccer -> Server
-		Destination Mac = Server Mac
-		Destination IP = Server IP
-
-		Source Mac = LB Mac
-		Source IP = LB IP
-	*/
-	if(iph->saddr == client_ip) {
-		bpf_printk("from client\n");
-		__u32 key = 0;
-		struct server_config *server = bpf_map_lookup_elem(&servers, &key);
-		if (!server) {
-			bpf_printk("no server\n");
-			return XDP_PASS;
-		}
-
-		// set server address and mac
-		iph->daddr = server->ip;
-		__builtin_memcpy(eth->h_dest, server->mac, ETH_ALEN);
-	}
-
-	/*
-		Server -> Load Balancer -> Client
-
-		Destination Mac = Client Mac
-		Destination IP = Client IP
-
-		Source Mac = LB Mac
-		Source IP = LB IP
-	*/
-	else{
-		// set client address and mac
-		bpf_printk("from server\n");
-		iph->daddr = client_ip;
-		__builtin_memcpy(eth->h_dest, client_mac, ETH_ALEN);
-	}
-	
-	iph->saddr = load_balancer_ip;
-	__builtin_memcpy(eth->h_source, load_balancer_mac, ETH_ALEN);
-
-	iph->check = iph_csum(iph);
-	// tcph->check = tcph_csum(tcph, iph, data_end);
-	int ret; 
-	ret = tcph_csum(tcph, iph, data_end);
-	if(ret == -1) {
-		return XDP_DROP;
-	}
-
-	bpf_printk("Redirecting packet to new IP 0x%x from IP 0x%x", 
-                bpf_ntohl(iph->daddr), 
-                bpf_ntohl(iph->saddr)
-            );
-    bpf_printk("New Dest MAC: %x:%x:%x:%x:%x:%x", eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
-    bpf_printk("New Source MAC: %x:%x:%x:%x:%x:%x\n", eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5]);
-
-	return XDP_TX;
+	return process_packet(eth, iph, tcph, data_end);
 }

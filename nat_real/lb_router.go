@@ -45,13 +45,13 @@ func NewRouter(ifaceName string) (*Router, error) {
 		return nil, err
 	}
 
-	servs, err := initServers()
+	router.serverList, err = initServers()
 	if err != nil {
 		router.Close()
 		return nil, err
 	}
 
-	if err := router.UpdateServer(servs); err != nil {
+	if err := router.UpdateServer(router.serverList); err != nil {
 		router.Close()
 		return nil, err
 	}
@@ -63,8 +63,9 @@ func (r *Router) UpdateServer(servers []*Server) error {
 	for i, server := range servers {
 		var key uint32 = uint32(i)
 		if err := r.objs.Servers.Put(&key, &bpfServerConfig{
-			Ip:  server.IP,
-			Mac: [6]uint8(server.Mac),
+			Ip:   server.IP,
+			Mac:  [6]uint8(server.Mac),
+			Port: server.Port,
 		}); err != nil {
 			return err
 		}

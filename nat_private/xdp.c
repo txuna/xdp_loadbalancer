@@ -10,8 +10,9 @@
 
 // #include "bpf_endian.h"
 #include "common.h"
+#include "xx_hash.h"
 
-#define SERVER_NUM 2
+#define SERVER_NUM 1
 #define MAX_TCP_CHECK_WORDS 750 // max 1500 bytes to check in TCP checksum. This is MTU dependent
 
 char _license[] SEC("license") = "GPL";
@@ -142,6 +143,22 @@ tcph_csum(struct tcphdr *tcph, struct iphdr *iph, void *data_end)
 	return 0;
 }
 
+// get hash
+static __always_inline __u32 get_hash(__u32 sip, __u32 dip, __u16 sport, __u16 dport) {
+		struct {
+		__u32 src_ip;
+		__u32 dst_ip;
+		__u16 src_port;
+		__u16 dst_port;
+	} four_tuple = {sip,
+					dip,
+					bpf_ntohs(sport),
+					bpf_ntohs(dport)
+                    };
+
+	return xxhash32((const char *)&four_tuple, sizeof(four_tuple), 0);
+}
+
 static __always_inline __u16
 iph_csum(struct iphdr *iph)
 {
@@ -211,6 +228,7 @@ int xdp_main(struct xdp_md *ctx) {
 		Source IP = LB IP
 	*/
 	if(iph->saddr == client_ip) {
+		bpf_printk("client hash: %ld", get_hash(iph->saddr, iph->daddr, tcph->source, tcph->dest));
 		bpf_printk("from client\n");
 		__u32 key = 0;
 		struct server_config *server = bpf_map_lookup_elem(&servers, &key);
@@ -235,6 +253,7 @@ int xdp_main(struct xdp_md *ctx) {
 	*/
 	else{
 		// set client address and mac
+		bpf_printk("server hash: %ld", get_hash(iph->saddr, iph->daddr, tcph->source, tcph->dest));
 		bpf_printk("from server\n");
 		iph->daddr = client_ip;
 		__builtin_memcpy(eth->h_dest, client_mac, ETH_ALEN);

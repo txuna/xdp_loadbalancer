@@ -235,10 +235,23 @@ ip netns delete container6
 ip link delete br0 
 ```
 
+docker가 만든 network namespace를 ip route 제어 범위안에 포함시키기
 ```bash
+sudo ln -s /var/run/docker/netns/89d7bd5d4bb6 /var/run/netns/89d7bd5d4bb6
 ```
 
+오 docker가 만든 network namespace를 ip 명령어로도 제어하고 싶으면 아래처럼 심볼릭 링크 연결하며 되는군요
+ex)
+ls /var/run/docker/netns 
+> 89d7bd5d4bb6 
+
+sudo ln -s /var/run/docker/netns/89d7bd5d4bb6 /var/run/netns/89d7bd5d4bb6
+
+ip netns exec 89d7bd5d4bb6 [command]
+
+
 ```bash
+sudo iptables -t nat -vnL POSTROUTING
 ```
 
 ```bash

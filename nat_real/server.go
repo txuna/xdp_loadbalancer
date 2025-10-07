@@ -21,12 +21,6 @@ func NewServer(ipStr, macStr, name string, port uint16) (*Server, error) {
 		Name: name,
 	}
 
-	// ip := net.ParseIP(ipStr)
-	// if ip == nil {
-	// 	return nil, fmt.Errorf("could not parse ip: %s", ipStr)
-	// }
-	// server.IP = binary.BigEndian.Uint32(ip.To4())
-
 	ip, err := InetPton4ToUint32(ipStr)
 	if err != nil {
 		return nil, err

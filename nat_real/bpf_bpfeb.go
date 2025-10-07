@@ -22,6 +22,8 @@ type bpfEvent struct {
 	DstIp   uint32
 	SrcPort uint16
 	DstPort uint16
+	State   uint8
+	_       [3]byte
 }
 
 type bpfServerConfig struct {
@@ -29,6 +31,21 @@ type bpfServerConfig struct {
 	Ip   uint32
 	Port uint16
 	Mac  [6]uint8
+}
+
+type bpfSession struct {
+	_          structs.HostLayout
+	ClientIp   uint32
+	ClientPort uint16
+	_          [2]byte
+	ServerIp   uint32
+	ServerPort uint16
+	Reserve    uint8
+	Used       uint8
+	LbPort     uint16
+	ClientMac  [6]uint8
+	ServerMac  [6]uint8
+	_          [2]byte
 }
 
 // loadBpf returns the embedded CollectionSpec for bpf.
@@ -80,16 +97,15 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	Events  *ebpf.MapSpec `ebpf:"events"`
-	Servers *ebpf.MapSpec `ebpf:"servers"`
+	Events     *ebpf.MapSpec `ebpf:"events"`
+	Servers    *ebpf.MapSpec `ebpf:"servers"`
+	SessionMap *ebpf.MapSpec `ebpf:"session_map"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
-	ClientIp        *ebpf.VariableSpec `ebpf:"client_ip"`
-	ClientMac       *ebpf.VariableSpec `ebpf:"client_mac"`
 	LoadBalancerIp  *ebpf.VariableSpec `ebpf:"load_balancer_ip"`
 	LoadBalancerMac *ebpf.VariableSpec `ebpf:"load_balancer_mac"`
 }
@@ -114,14 +130,16 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	Events  *ebpf.Map `ebpf:"events"`
-	Servers *ebpf.Map `ebpf:"servers"`
+	Events     *ebpf.Map `ebpf:"events"`
+	Servers    *ebpf.Map `ebpf:"servers"`
+	SessionMap *ebpf.Map `ebpf:"session_map"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.Events,
 		m.Servers,
+		m.SessionMap,
 	)
 }
 
@@ -129,8 +147,6 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
-	ClientIp        *ebpf.Variable `ebpf:"client_ip"`
-	ClientMac       *ebpf.Variable `ebpf:"client_mac"`
 	LoadBalancerIp  *ebpf.Variable `ebpf:"load_balancer_ip"`
 	LoadBalancerMac *ebpf.Variable `ebpf:"load_balancer_mac"`
 }
