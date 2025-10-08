@@ -29,7 +29,7 @@ enum {
 	END_FIN,
 };
 
-#define MAX_SESSION 10000
+#define MAX_SESSION 20000
 
 // TCP STATE
 enum {
@@ -427,16 +427,16 @@ int xdp_main(struct xdp_md *ctx) {
 		return XDP_PASS;
 	}
 
-	es = bpf_ringbuf_reserve(&events, sizeof(struct event), 0);
-	if (!es) {
-		return XDP_PASS;
-	}
+	// es = bpf_ringbuf_reserve(&events, sizeof(struct event), 0);
+	// if (!es) {
+	// 	return XDP_PASS;
+	// }
 	
-	es->src_ip = iph->saddr;
-	es->src_port = tcph->source;
-	es->dst_ip = iph->daddr;
-	es->dst_port = tcph->dest;
-	bpf_ringbuf_submit(es, 0);
+	// es->src_ip = iph->saddr;
+	// es->src_port = tcph->source;
+	// es->dst_ip = iph->daddr;
+	// es->dst_port = tcph->dest;
+	// bpf_ringbuf_submit(es, 0);
 
 	return process_packet(eth, iph, tcph, data_end);
 }
