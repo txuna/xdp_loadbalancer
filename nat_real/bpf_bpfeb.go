@@ -34,18 +34,19 @@ type bpfServerConfig struct {
 }
 
 type bpfSession struct {
-	_          structs.HostLayout
-	ClientIp   uint32
-	ClientPort uint16
-	_          [2]byte
-	ServerIp   uint32
-	ServerPort uint16
-	Reserve    uint8
-	Used       uint8
-	LbPort     uint16
-	ClientMac  [6]uint8
-	ServerMac  [6]uint8
-	_          [2]byte
+	_           structs.HostLayout
+	ClientIp    uint32
+	ClientPort  uint16
+	_           [2]byte
+	ServerIp    uint32
+	ServerPort  uint16
+	Reserve     uint8
+	Used        uint8
+	LbPort      uint16
+	ClientMac   [6]uint8
+	ServerMac   [6]uint8
+	ClientState uint8
+	ServerState uint8
 }
 
 // loadBpf returns the embedded CollectionSpec for bpf.

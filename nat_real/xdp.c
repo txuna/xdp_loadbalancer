@@ -22,6 +22,13 @@
 #define CLIENT 1
 #define SERVER 2
 
+enum {
+	ESTABLISHED = 1,
+	FIN,
+	START_FIN,
+	END_FIN,
+};
+
 #define MAX_SESSION 10000
 
 // TCP STATE
@@ -76,6 +83,9 @@ struct session{
 
 	__u8 client_mac[ETH_ALEN];
 	__u8 server_mac[ETH_ALEN];
+
+	__u8 client_state;
+	__u8 server_state;
 };
 
 struct {
@@ -164,11 +174,6 @@ static __always_inline __u16 tcph_csum(struct tcphdr *tcph, struct iphdr *iph, v
 	__u32 payload_len = total_len - ip_header_len - tcp_header_len;
 
 	__u32 tcp_len = tcp_header_len + payload_len; 
-	
-	// bpf_printk("total len: %d", total_len);
-	// bpf_printk("ip header len: %d", ip_header_len);
-	// bpf_printk("tcp header size: %d", tcp_header_len);
-	// bpf_printk("tcp payload len: %d", payload_len);
 
     // Clear checksum
     tcph->check = 0;
@@ -221,6 +226,15 @@ static __always_inline __u16 iph_csum(struct iphdr *iph)
     return csum_fold_helper(csum);
 }
 
+// client & server 모두 TCP_FIN인경우
+static __always_inline int is_closed(struct session *ss) {
+	if(ss->client_state == FIN && ss->server_state == FIN) {
+		return 1;
+	}
+
+	return 0;
+}
+
 // key: client:10.201.0.1, client:port - lb:10.201.0.4, lb:8000
 static __always_inline int process_from_client(struct ethhdr *eth, struct iphdr *iph, struct tcphdr *tcph, void *data_end) {
 	__u32 hash = get_two_hash(iph->saddr, tcph->source);
@@ -251,6 +265,8 @@ static __always_inline int process_from_client(struct ethhdr *eth, struct iphdr 
 			.server_port = server->port,
 			.lb_port = port_num,
 			.used = 1,
+			.client_state = ESTABLISHED,
+			.server_state = ESTABLISHED,
 		};
 
 		__builtin_memcpy(&ss.client_mac, eth->h_source, ETH_ALEN);
@@ -286,49 +302,35 @@ static __always_inline int process_from_client(struct ethhdr *eth, struct iphdr 
 	iph->check = iph_csum(iph);
 	tcph->check = tcph_csum(tcph, iph, data_end);
 
+	switch(ss->client_state) {
+		case ESTABLISHED:
+			if(tcph->fin) {
+				ss->client_state = FIN;
+				goto update;
+			}
+			break;
+		case FIN:
+			if(tcph->ack) {
+				if(is_closed(ss)) {
+					goto delete;
+				}
+			}
+			break;
+	}
+
+	return XDP_TX;
+
+update:
+	bpf_map_update_elem(&session_map, &port_num, ss, BPF_ANY);
+	bpf_printk("[client] [0x%x:%d] send FIN to 0x%x:%d, lb port: %d", ss->client_ip, ss->client_port, ss->server_ip, ss->server_port, ss->lb_port);
+	return XDP_TX;
+
+delete:
+	bpf_map_delete_elem(&session_map, &port_num);
+	bpf_printk("[client] [0x%x:%d] close session to 0x%x:%d, lb port: %d", ss->client_ip, ss->client_port, ss->server_ip, ss->server_port, ss->lb_port);
 	return XDP_TX;
 }
 
-// static __always_inline void process_tcp_state(struct tcphdr *tcph, struct session *ss, __u32 hash) {
-// 	switch (ss->state) {
-// 		case TCP_CLOSE:
-// 			if (tcph->syn) {
-// 				ss->state = TCP_SYN_SENT;
-// 			}
-// 			break;
-
-// 		case TCP_SYN_SENT:
-// 			if(tcph->ack) {
-// 				ss->state = TCP_ESTABLISHED;
-// 			}
-// 			break;
-
-// 		case TCP_ESTABLISHED:
-// 			if(tcph->fin) {
-// 				ss->state = TCP_FIN_WAIT1;
-// 			}
-// 			break;
-		
-// 		case TCP_FIN_WAIT1:
-// 			break;
-
-// 		case TCP_FIN_WAIT2:
-// 			break;
-
-// 		default:
-// 			bpf_printk("unknown state: %d", ss->state);
-// 	}
-
-// 	// client, server측으로부터 update시도됨. 해당 객체가 있다면 업데이트
-// 	bpf_map_update_elem(&sessions, hash, ss, BPF_EXIST);
-// 	return;
-	
-
-// // 객체 목록에서 지워야 할 때 FIN or RST segment
-// delete:
-// 	bpf_map_delete_elem(&sessions, hash);
-// 	return;
-// }
 
 static __always_inline int process_from_server(struct ethhdr *eth, struct iphdr *iph, struct tcphdr *tcph, void *data_end) {
 	// 서버가 설정한 목적지 포트를 키로 지정한다. 
@@ -352,6 +354,32 @@ static __always_inline int process_from_server(struct ethhdr *eth, struct iphdr 
 	iph->check = iph_csum(iph);
 	tcph->check = tcph_csum(tcph, iph, data_end);
 
+	switch(ss->server_state) {
+		case ESTABLISHED:
+			if(tcph->fin) {
+				ss->server_state = FIN;
+				goto update;
+			}
+			break;
+		case FIN:
+			if(tcph->ack){
+				if(is_closed(ss)) {
+					goto delete;
+				}
+			}
+			break;
+	}
+
+	return XDP_TX;
+
+update:
+	bpf_map_update_elem(&session_map, &port_num, ss, BPF_ANY);
+	bpf_printk("[server] [0x%x:%d] send FIN to 0x%x:%d, lb port: %d", ss->server_ip, ss->server_port, ss->client_ip, ss->client_port, ss->lb_port);
+	return XDP_TX;
+
+delete:
+	bpf_map_delete_elem(&session_map, &port_num);
+	bpf_printk("[server] [0x%x:%d] close session to 0x%x:%d, lb port: %d", ss->server_ip, ss->server_port, ss->client_ip, ss->client_port, ss->lb_port);
 	return XDP_TX;
 }
 
