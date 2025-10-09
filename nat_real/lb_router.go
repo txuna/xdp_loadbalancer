@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"log"
 	"net"
+	"time"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
@@ -69,6 +71,40 @@ func (r *Router) UpdateServer(servers []*Server) error {
 		}); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+func (r *Router) Metric() error {
+	ticker := time.NewTicker(1 * time.Second)
+	for t := range ticker.C {
+		fmt.Printf("===============[session map]===============\n")
+
+		sessionMap, err := r.objs.SessionMap.Clone()
+		if err != nil {
+			return err
+		}
+
+		var port uint32
+		var session bpfSession
+		var used int = 0
+		iter := sessionMap.Iterate()
+
+		for {
+			if !iter.Next(&port, &session) {
+				break
+			}
+
+			if session.Used == 1 {
+				used += 1
+			}
+		}
+
+		sessionMap.Close()
+		fmt.Printf("[%s] used: %d\n", t, used)
+
+		used = 0
 	}
 
 	return nil

@@ -20,6 +20,13 @@ func main() {
 
 	defer router.Close()
 
+	go func() {
+		if err := router.Metric(); err != nil {
+			log.Printf("failed to metrics: %s", err)
+			return
+		}
+	}()
+
 	if err := router.Ring(); err != nil {
 		log.Printf("failed to ring: %s", err)
 		return

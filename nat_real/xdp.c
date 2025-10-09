@@ -29,7 +29,7 @@ enum {
 	END_FIN,
 };
 
-#define MAX_SESSION 20000
+#define MAX_SESSION 30000
 
 // TCP STATE
 enum {
@@ -238,7 +238,7 @@ static __always_inline int is_closed(struct session *ss) {
 // key: client:10.201.0.1, client:port - lb:10.201.0.4, lb:8000
 static __always_inline int process_from_client(struct ethhdr *eth, struct iphdr *iph, struct tcphdr *tcph, void *data_end) {
 	__u32 hash = get_two_hash(iph->saddr, tcph->source);
-	__u32 port_num = (hash % 1000) + 30000;
+	__u32 port_num = (hash % MAX_SESSION) + 20000;
 	__u32 server_key = hash % SERVER_NUM;
 
 	struct session *ss; 
@@ -249,7 +249,7 @@ static __always_inline int process_from_client(struct ethhdr *eth, struct iphdr 
 		ss = bpf_map_lookup_elem(&session_map, &port_num);
 		// 이미 있다면 (점유로 의심)
 		if(ss != NULL && ss->used) {
-			bpf_printk("[client] [0x%x:%d] already used lb port: %d, will be drop", iph->saddr, tcph->source, port_num);
+			// bpf_printk("[client] [0x%x:%d] already used lb port: %d, will be drop", iph->saddr, tcph->source, port_num);
 			return XDP_DROP;
 		}
 
@@ -274,7 +274,7 @@ static __always_inline int process_from_client(struct ethhdr *eth, struct iphdr 
 
 		bpf_map_update_elem(&session_map, &port_num, &ss, BPF_NOEXIST);
 
-		bpf_printk("[client] [0x%x:%d] new client assigned lb port: %d and server: 0x%x:%d", iph->saddr, tcph->source, port_num, server->ip, server->port);
+		// bpf_printk("[client] [0x%x:%d] new client assigned lb port: %d and server: 0x%x:%d", iph->saddr, tcph->source, port_num, server->ip, server->port);
 	}
 
 	ss = bpf_map_lookup_elem(&session_map, &port_num);
@@ -282,7 +282,7 @@ static __always_inline int process_from_client(struct ethhdr *eth, struct iphdr 
 		return XDP_DROP;
 	}
 
-	bpf_printk("[client] [0x%x:%d] redirect to 0x%x:%d, lb port: %d", ss->client_ip, ss->client_port, ss->server_ip, ss->server_port, ss->lb_port);
+	// bpf_printk("[client] [0x%x:%d] redirect to 0x%x:%d, lb port: %d", ss->client_ip, ss->client_port, ss->server_ip, ss->server_port, ss->lb_port);
 	
 	__builtin_memcpy(eth->h_dest, ss->server_mac, ETH_ALEN);
 	__builtin_memcpy(eth->h_source, load_balancer_mac, ETH_ALEN);
@@ -301,6 +301,11 @@ static __always_inline int process_from_client(struct ethhdr *eth, struct iphdr 
 	// 체크섬 계산
 	iph->check = iph_csum(iph);
 	tcph->check = tcph_csum(tcph, iph, data_end);
+
+	if(tcph->rst) {
+		// bpf_printk("client rst");
+		goto delete;
+	}
 
 	switch(ss->client_state) {
 		case ESTABLISHED:
@@ -322,12 +327,12 @@ static __always_inline int process_from_client(struct ethhdr *eth, struct iphdr 
 
 update:
 	bpf_map_update_elem(&session_map, &port_num, ss, BPF_ANY);
-	bpf_printk("[client] [0x%x:%d] send FIN to 0x%x:%d, lb port: %d", ss->client_ip, ss->client_port, ss->server_ip, ss->server_port, ss->lb_port);
+	// bpf_printk("[client] [0x%x:%d] send FIN to 0x%x:%d, lb port: %d", ss->client_ip, ss->client_port, ss->server_ip, ss->server_port, ss->lb_port);
 	return XDP_TX;
 
 delete:
 	bpf_map_delete_elem(&session_map, &port_num);
-	bpf_printk("[client] [0x%x:%d] close session to 0x%x:%d, lb port: %d", ss->client_ip, ss->client_port, ss->server_ip, ss->server_port, ss->lb_port);
+	// bpf_printk("[client] [0x%x:%d] close session to 0x%x:%d, lb port: %d", ss->client_ip, ss->client_port, ss->server_ip, ss->server_port, ss->lb_port);
 	return XDP_TX;
 }
 
@@ -341,7 +346,7 @@ static __always_inline int process_from_server(struct ethhdr *eth, struct iphdr 
 		return XDP_DROP;
 	}
 
-	bpf_printk("[server] [0x%x:%d] redirect to 0x%x:%d, lb port: %d", ss->server_ip, ss->server_port, ss->client_ip, ss->client_port, ss->lb_port);
+	// bpf_printk("[server] [0x%x:%d] redirect to 0x%x:%d, lb port: %d", ss->server_ip, ss->server_port, ss->client_ip, ss->client_port, ss->lb_port);
 
 	__builtin_memcpy(eth->h_dest, ss->client_mac, ETH_ALEN);
 	__builtin_memcpy(eth->h_source, load_balancer_mac, ETH_ALEN);
@@ -353,6 +358,11 @@ static __always_inline int process_from_server(struct ethhdr *eth, struct iphdr 
 	// 체크섬 계산
 	iph->check = iph_csum(iph);
 	tcph->check = tcph_csum(tcph, iph, data_end);
+
+	if(tcph->rst) {
+		// bpf_printk("server rst!");
+		goto delete;
+	}
 
 	switch(ss->server_state) {
 		case ESTABLISHED:
@@ -374,12 +384,12 @@ static __always_inline int process_from_server(struct ethhdr *eth, struct iphdr 
 
 update:
 	bpf_map_update_elem(&session_map, &port_num, ss, BPF_ANY);
-	bpf_printk("[server] [0x%x:%d] send FIN to 0x%x:%d, lb port: %d", ss->server_ip, ss->server_port, ss->client_ip, ss->client_port, ss->lb_port);
+	// bpf_printk("[server] [0x%x:%d] send FIN to 0x%x:%d, lb port: %d", ss->server_ip, ss->server_port, ss->client_ip, ss->client_port, ss->lb_port);
 	return XDP_TX;
 
 delete:
 	bpf_map_delete_elem(&session_map, &port_num);
-	bpf_printk("[server] [0x%x:%d] close session to 0x%x:%d, lb port: %d", ss->server_ip, ss->server_port, ss->client_ip, ss->client_port, ss->lb_port);
+	// bpf_printk("[server] [0x%x:%d] close session to 0x%x:%d, lb port: %d", ss->server_ip, ss->server_port, ss->client_ip, ss->client_port, ss->lb_port);
 	return XDP_TX;
 }
 
