@@ -20,25 +20,33 @@ eBPF/XDP와 관련해서 설명하기전에 BPF라는 것이 무엇인지 간략
 ![alt text](image-1.png)
 [출처: https://ebpf.io/what-is-ebpf/]  
 
-eBPF는 BPF(Berkeley Packet Filter)의 약자이지만 extend BPF는 패킷필터 이상의 기능(관찰가능성, 트레이싱, ,,,)을 수행하기 때문에 이제는 어떤 의미도 없는 독릭적인 용어다. eBPF 프로그램은 이벤트 기반이며 커널이나 애플리케이션이 특정 훅 지점을 통과할 때 실행된다. 후크의 종류로는 syscall, kernel&user tracing, network event, function entry/exit가 존재한다. 이러한 eBPF 프로그램은 커널스페이스에서 동작하기 때문에 엄격한 Verifier(검증기)를 통해 동작에 이상이 없음을 확인하고 JIT Compiler로부터 동작된다. 엄격한 검증기때문에 몇몇 함수 사용이 제한되기 때문에 eBPF는 특수한 형태의 커널 헬퍼 함수를 사용할 수 있다. 
+eBPF는 BPF(Berkeley Packet Filter)의 약자이지만 extend BPF는 패킷필터 이상의 기능(관찰가능성, 트레이싱, ,,,)을 수행하기 때문에 이제는 어떤 의미도 없는 독릭적인 용어다. eBPF 프로그램은 이벤트 기반이며 커널이나 애플리케이션이 특정 훅 지점을 통과할 때 실행된다. 후크의 종류로는 syscall, kernel or user tracing, network event, function entry/exit가 존재한다. 이러한 eBPF 프로그램은 커널스페이스에서 동작하기 때문에 엄격한 Verifier(검증기)를 통해 동작에 이상이 없음을 확인하고 JIT Compiler로부터 동작된다. 엄격한 검증기때문에 몇몇 함수 사용이 제한되기 때문에 eBPF는 특수한 형태의 커널 헬퍼 함수를 사용할 수 있다. 
 > 엄격한 검사의 예로는 패킷 포인터 접근시 경계를 넘어갈 가능성이 있는지등이 존재한다.
 
-### 패킷처리 과정과 eXpress Data Path
+### 패킷처리 과정
+일반적인 처리과정보단 로드밸런서 XDP 프로그램을 veth에 attach예정이므로 veth에서의 패킷 처리 과정을 살펴본다. 
+> XDP Program이 veth에 붙었는가 또는 GRO가 활성화 되었는가에 따라 동작이 달라진다.
+
+veth에서의 처리 과정 veth_poll()
+
+
+### XDP(eXpress Data Path)
 XDP(eXpress Data Path)는 프로그래밍 가능한 패킷 처리 기술이다. 이전에 존재한 DPDK는 커널을 우회했기 때문에 보안과 안정성은 보장할 수 없었다. XDP 프로그램은 앞서 말한것과 같이 eBPF 프로그램은 검증기와 JIT을 통해 커널공간에서 안전하게 실행된다. 또한, XDP는 리눅스 커널의 일부분으로 구현되어 있어 리눅스 네트워크 스택과 완전히 통합된다.
 
 XDP 프로그램은 기본적으로 CPU가 아닌 NIC에서 오프로딩되어 실행된다. 
 
 XDP 프로그램의 ACTION값으로 XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX가 존재한다. 
 
+- XDP_ABORTED: 패킷을 DROP함과 동시에 예외를 추가로 일으킨다.
 - XDP_DROP : 패킷을 DROP한다.  
 - XDP_PASS : 패킷을 다음 처리기로 이동을 허용한다.
-- XDP_REDIRECT : 
+- XDP_REDIRECT : 패킷을 돌려보낼 때 어느 NIC로 보낼지 선택이 가능하다. 
 - XDP_TX : 패킷을 수신했던 NIC로 다시 주입한다. 
 
 ### 로드밸런서
 지금까지 XDP에 대해서 간략하게 알아보았다. 다음은 이 글의 목적인 XDP 로드밸런서를 구현하고 이를 테스트하는 시간을 가진다. XDP로드밸런서를 구현하기 위해서는 2가지의 방식이 존재한다. 
 
-#### NAT 로드밸런서
+#### NAT 로드밸런서 (Masquerading)
 가장 구현난이도가 낮은 방식이나 성능적인 측면에서 다음에 나올 Direct Server Return 방식보다는 좋지못하다. 
 ![alt text](image-3.png)
 위는 NAT방식의 XDP 로드밸런서를 구현할 때 기본적인 구조이다. XDP는 NIC에서 패킷 수신 후 리눅스 네트워크 스택을 태우기전에 실행되는 구간이므로 ehternet frame과 ip, tcp header 및 option 처리가 필요하다. XDP 프로그램에서 트리거된 패킷을 살펴보면 목적지가 로드밸런서쪽으로 되어 있기 때문에 해당 값을 원하는 서버 목적지 정보 입력이 필요하다. 또한 패킷의 IP Header와 TCP Header 정보가 수정되었기 떄문에 각 각 Checksum 재계산이 필요하다. 
