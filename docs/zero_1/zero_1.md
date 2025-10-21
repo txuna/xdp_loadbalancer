@@ -19,29 +19,95 @@
 eBPF/XDP와 관련해서 설명하기전에 BPF라는 것이 무엇인지 간략하게 설명하는것부터 시작한다.
 ![alt text](image-1.png)
 [출처: https://ebpf.io/what-is-ebpf/]  
+> 본 내용은 XDP를 설명하기위한 과정이므로 eBPF Virtual Machine, Verifier의 동작은 설명하지 않으며 언급만하고 넘어간다.
 
 eBPF는 BPF(Berkeley Packet Filter)의 약자이지만 extend BPF는 패킷필터 이상의 기능(관찰가능성, 트레이싱, ,,,)을 수행하기 때문에 이제는 어떤 의미도 없는 독릭적인 용어다. eBPF 프로그램은 이벤트 기반이며 커널이나 애플리케이션이 특정 훅 지점을 통과할 때 실행된다. 후크의 종류로는 syscall, kernel or user tracing, network event, function entry/exit가 존재한다. 이러한 eBPF 프로그램은 커널스페이스에서 동작하기 때문에 엄격한 Verifier(검증기)를 통해 동작에 이상이 없음을 확인하고 JIT Compiler로부터 동작된다. 엄격한 검증기때문에 몇몇 함수 사용이 제한되기 때문에 eBPF는 특수한 형태의 커널 헬퍼 함수를 사용할 수 있다. 
 > 엄격한 검사의 예로는 패킷 포인터 접근시 경계를 넘어갈 가능성이 있는지등이 존재한다.
 
-### 패킷처리 과정
-일반적인 처리과정보단 로드밸런서 XDP 프로그램을 veth에 attach예정이므로 veth에서의 패킷 처리 과정을 살펴본다. 
-> XDP Program이 veth에 붙었는가 또는 GRO가 활성화 되었는가에 따라 동작이 달라진다.
+즉, eBPF는 크게 BPF MAP, Virtual Machine, Verifier 3가지의 구성요소가 존재한다.
 
-veth에서의 처리 과정 veth_poll()
+### 패킷처리 과정과 eXpress Data Path
+XDP(eXpress Data Path)는 프로그래밍 가능한 패킷 처리 기술이다. 이전에 존재한 DPDK는 커널을 우회했기 때문에 보안과 안정성은 보장할 수 없었다. XDP 프로그램은 앞서 말한것과 같이 eBPF 프로그램은 검증기와 JIT을 통해 커널공간에서 안전하게 실행된다. 또한, XDP는 리눅스 커널의 일부분으로 구현되어 있어 리눅스 네트워크 스택과 완전히 통합된다. 그렇기에 프로그래머는 커널과 사용자 공간사이의 컨텍스트 전환없이 장치 드라이버(NIC)에서 직접 코드 실행이 가능하기에 하드웨어에서 패킷 수신 직후 해당 패킷의 처리를 결정 또는 조작등 여러가지 구현이 가능하다.
 
-
-### XDP(eXpress Data Path)
-XDP(eXpress Data Path)는 프로그래밍 가능한 패킷 처리 기술이다. 이전에 존재한 DPDK는 커널을 우회했기 때문에 보안과 안정성은 보장할 수 없었다. XDP 프로그램은 앞서 말한것과 같이 eBPF 프로그램은 검증기와 JIT을 통해 커널공간에서 안전하게 실행된다. 또한, XDP는 리눅스 커널의 일부분으로 구현되어 있어 리눅스 네트워크 스택과 완전히 통합된다.
-
-XDP 프로그램은 기본적으로 CPU가 아닌 NIC에서 오프로딩되어 실행된다. 
-
-XDP 프로그램의 ACTION값으로 XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX가 존재한다. 
+만든 XDP 프로그램의 반환값으로 Action이라는 정수 반환값을 필요로 하며 지원가능한 값은 다음과 같다. 'XDP_DROP', 'XDP_PASS', 'XDP_REDIRECT', 'XDP_TX'
 
 - XDP_ABORTED: 패킷을 DROP함과 동시에 예외를 추가로 일으킨다.
 - XDP_DROP : 패킷을 DROP한다.  
 - XDP_PASS : 패킷을 다음 처리기로 이동을 허용한다.
-- XDP_REDIRECT : 패킷을 돌려보낼 때 어느 NIC로 보낼지 선택이 가능하다. 
+- XDP_REDIRECT : 도착한 패킷을 다른 NIC로 전달하거나, 추가처리를 위한 다른 CPU로 전달허간, 사용자 공간으로 전달한다.
 - XDP_TX : 패킷을 수신했던 NIC로 다시 주입한다. 
+> XDP_REDIRECT의 경우 나머지 3개의 Action과 달리 bpf helper함수를 필요로한다.
+
+XDP가 무엇인지는 대략적으로 감을 잡았더라도 어떻게 동작하는지 와닫지 않았을것이다. 실제로 XDP Program이 어떠한 과정으로 실행되는지 짧게 살펴본다. 사용되는 시스템은 실제 호스트가 아닌 가상머신으로 진행예정이므로 linux kernel의 Virtio를 중심으로 살펴본다. 그리고 실제 XDP프로그램이 veth에 attach 예정인데 veth에 XDP 프로그램이 붙었는가에 따라 동작이 상이해진다. 이러한 부분을 집중적으로 살펴보겠다. 또한 XDP는 Native와 Generic모드가 존재하는데 이 또한 Native모드로 살펴본다. Native의 경우 sk_buff 할당전에 처리하고 Generic모드의 경우 sk_buff가 구성된 이후에 처리된다. 
+
+XDP 프로그램 훅을 attach를하게 되면 dev_xdp_attach함수가 호출된다.
+```C
+/* drivers/net/veth.c */
+static const struct net_device_ops veth_netdev_ops = {
+	.ndo_init           = veth_dev_init,
+	.ndo_start_xmit     = veth_xmit,
+	.ndo_bpf		    = veth_xdp,
+	.ndo_xdp_xmit		= veth_ndo_xdp_xmit,
+	.ndo_get_peer_dev	= veth_peer_dev,
+};
+
+/* drivers/net/virtio_net.c */
+static const struct net_device_ops virtnet_netdev = {
+	.ndo_open            = virtnet_open,
+	.ndo_stop   	     = virtnet_close,
+	.ndo_start_xmit      = start_xmit,
+	.ndo_bpf		     = virtnet_xdp,
+};
+
+/* net/core/dev.c */
+static int dev_xdp_attach(struct net_device *dev, struct netlink_ext_ack *extack,
+			  struct bpf_xdp_link *link, struct bpf_prog *new_prog,
+			  struct bpf_prog *old_prog, u32 flags)
+{
+    enum bpf_xdp_mode mode;
+    [...]
+    mode = dev_xdp_mode(dev, flags);
+    [...]
+    cur_prog = dev_xdp_prog(dev, mode);
+    [...]
+    bpf_op = dev_xdp_bpf_op(dev, mode);
+    [...]
+    err = dev_xdp_install(dev, mode, bpf_op, extack, flags, new_prog);
+}
+
+/* net/core/dev.c */
+static bpf_op_t dev_xdp_bpf_op(struct net_device *dev, enum bpf_xdp_mode mode)
+{
+	switch (mode) {
+	case XDP_MODE_SKB:
+		return generic_xdp_install;
+	case XDP_MODE_DRV:
+	case XDP_MODE_HW:
+		return dev->netdev_ops->ndo_bpf;
+	default:
+		return NULL;
+	}
+}
+```
+XDP 프로그램을 설치하게되면 dev_xdp_attach 함수를 호출하여 xdp를 붙일 때 Generic 또는 Native중 선택한다. generic의 경우 generic_xdp_install함수를 호출하여 generic_xdp_needed_key 값을 세팅한다. 해당 값이 세팅되면 __netif_receive_skb_core -> do_xdp_generic 함수를 호출하여 XDP 프로그램을 Generic모드에서 실행시킨다. 함수에서 볼 수 있듯이 sk_buff 할당 이후에 실행되기에 일반적으로 알려진 XDP성능이 좀처럼 나오지않는다. 그 외의 경우 ndo_bpf에 연결된 함수 포인터를 호출하게 된다. virtio_net의 경우 virtnet_xdp, veth의 경우 veth_xdp 함수 이다. 
+
+
+```bash
+ virtnet_xdp_handler+0
+        receive_small+616
+        receive_buf+264
+        virtnet_receive.constprop.0+724
+        virtnet_poll+104
+        __napi_poll+72
+```
+
+```bash
+veth_xdp_rcv_skb+0
+        veth_poll+152
+        __napi_poll+72
+        net_rx_action+488
+        handle_softirqs+312
+```
 
 ### 로드밸런서
 지금까지 XDP에 대해서 간략하게 알아보았다. 다음은 이 글의 목적인 XDP 로드밸런서를 구현하고 이를 테스트하는 시간을 가진다. XDP로드밸런서를 구현하기 위해서는 2가지의 방식이 존재한다. 
@@ -72,3 +138,13 @@ XDP hook은 napi전이라서 CPU안쓰는듯
 generic, native,
 
 NAPI poll전인가? XDP HOOK이 트리거되는 시점이 정확히 어디인자 확인해야 할드
+
+
+
+sudo bpftrace -e '
+kprobe:netif_receive_skb {
+    $skb = (struct sk_buff *)arg0;
+    $dev = $skb->dev;
+    printf("ifname=%s pid=%d\n", $dev->name, pid);
+    print(kstack);
+}'
