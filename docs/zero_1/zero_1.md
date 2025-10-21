@@ -89,7 +89,7 @@ static bpf_op_t dev_xdp_bpf_op(struct net_device *dev, enum bpf_xdp_mode mode)
 	}
 }
 ```
-XDP 프로그램을 설치하게되면 dev_xdp_attach 함수를 호출하여 xdp를 붙일 때 Generic 또는 Native중 선택한다. generic의 경우 generic_xdp_install함수를 호출하여 generic_xdp_needed_key 값을 세팅한다. 해당 값이 세팅되면 __netif_receive_skb_core -> do_xdp_generic 함수를 호출하여 XDP 프로그램을 Generic모드에서 실행시킨다. 함수에서 볼 수 있듯이 sk_buff 할당 이후에 실행되기에 일반적으로 알려진 XDP성능이 좀처럼 나오지않는다. 그 외의 경우 ndo_bpf에 연결된 함수 포인터를 호출하게 된다. virtio_net의 경우 virtnet_xdp, veth의 경우 veth_xdp 함수 이다. 
+XDP 프로그램을 설치하게되면 dev_xdp_attach 함수를 호출하여 xdp를 붙일 때 Generic 또는 Native중 선택한다. dev_xdp_install함수 내에서 generic의 경우 generic_xdp_install함수를 호출하여 generic_xdp_needed_key 값을 세팅한다. generic의 경우 해당 값이 세팅되면 __netif_receive_skb_core -> do_xdp_generic 함수를 호출하여 XDP 프로그램을 실행한다. 함수에서 볼 수 있듯이 sk_buff 할당 이후에 실행되기에 일반적으로 알려진 XDP성능이 좀처럼 나오지않는다. 그 외의 경우 ndo_bpf에 연결된 함수 포인터를 호출하게 된다. virtio_net의 경우 virtnet_xdp, veth의 경우 veth_xdp 함수 이다. 
 
 
 ```bash
