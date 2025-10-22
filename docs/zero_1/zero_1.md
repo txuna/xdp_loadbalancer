@@ -107,15 +107,105 @@ static int veth_enable_xdp_range(struct net_device *dev, int start, int end,
 	return err;
 }
 ```
-`veth_xdp`함수를 시작으로 타고 들어가면 `veth_enable_xdp_range`라는 함수를 확인할 수 있다. 해당 구간을 통해 napi의 poll함수 포인터에 `veth_poll`함수를 등록한다. NAPI를 활성화하고 polling함수로 `veth_poll`을 사용함을 의미한다. `NAPI`에대한 글이아닌 XDP 설치 및 실행에 관한것이기에 자세한것은 넘어간다.
+`veth_xdp`함수를 시작으로 타고 들어가면 `veth_enable_xdp_range`라는 함수를 확인할 수 있다. 해당 구간을 통해 napi의 poll함수 포인터에 `veth_poll`함수를 등록한다. NAPI를 활성화하고 polling함수로 `veth_poll`을 사용함을 의미한다. `NAPI`에대한 글이아닌 XDP 설치 및 실행에 관한것이기에 자세한것은 넘어간다. `bpftrace`를 사용해서 설명한 구간까지 실행되는지를 확인할 수 있다.
+
+```bash
+$ sudo bpftrace -e 'kprobe:veth_enable_xdp_range { print(kstack); }'
+Attaching 1 probe...
+
+veth_enable_xdp_range+0
+veth_xdp_set+312
+veth_xdp+40
+dev_xdp_install+116
+dev_xdp_attach+512
+bpf_xdp_link_attach+512
+link_create+548
+__sys_bpf+788
+```
+`kprobe`를 사용해서 `veth_enable_xdp_range` 함수가 호출되는 시점에 kernel stack을 출력하는 `print(kstack)`를 실행한다. 이또한 `eBPF`를 사용해서 커널코드를 트레이싱하는 도구로 여기서도 `eBPF`의 편리함과 강력함을 알 수 있다.
+
+여기까지가 XDP프로그램을 attach했을 때의 로직이다. `NAPI`관련해서는 보여야할 내용이 매우 많기 때문에 기회가 된다면 다른 챕터를 통해서 소개하고 싶다.
 
 #### 번외) veth가 Native XDP를 지원하나요?
 2018년 커널 패치중 veth에 generic이 아닌 native XDP를 지원하는 패치가 등장했다. 관련된 내용은 아래 패치를 참고하기를 바란다.  [Merge branch 'bpf-veth-xdp-support'](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=60afdf066a35317efd5d1d7ae7c7f4ef2b32601f)
 
 
 ### XDP EXECUTION
+설치된 XDP 프로그램이 실행되는 구간을 살펴볼 필요가 있다. 패킷처리 과정에서 XDP Program을 실행시키는데 공통적으로 `bpf_prog_run_xdp`함수를 호출하면서 동작한다. `veth`를 기준으로 해당 함수가 실행되기까지를 조금 설명하자면 다음과 같다. 그리고 실제 동작을 확인하기 위해 아래와 같이 was라는 `network namespace`를 만들고 `veth`를 배정한다.
+
+```bash
+# was라는 network namespace를 만든다.
+$ sudo ip netns add was
+
+# veth0, veth1쌍을 생성한다. 
+$ sudo ip link add veth0 type veth peer name veth1
+
+# veth1를 was network namespace에 배정한다.
+$ sudo ip link set veth1 netns was
+# 배정 확인
+$ sudo ip netns exec was ip link
+
+# veth0에 10.10.0.2 IP 주소를 부여한다. veth1에도 10.10.0.3을 부여한다.
+$ sudo ip a add 10.10.0.2/24 dev veth0
+$ sudo ip netns exec was ip a add 10.10.0.3/24 dev veth1
+
+# veth0, veth1 up으로 변경한다.
+$ sudo ip link set dev veth0 up
+$ sudo ip netns exec was ip link set dev veth1 up
+
+# 삭제
+$ ip netns del was
+```
+
+```bash
+### 1
+$ sudo ip link
+13: veth0@if12       UP             0a:31:b3:03:2a:a9 <BROADCAST,MULTICAST,UP,LOWER_UP>
+
+### 2
+$ sudo ip netns exec was ip link
+lo               UNKNOWN        00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP>
+12: veth1@if13       UP             fe:2d:16:44:5c:c4 <BROADCAST,MULTICAST,UP,LOWER_UP>
+```
+
+`ifindex`값이 각 각 `13`, `12`가 출력된다. 이상태에서 `was` 네임스페이스에서 웹서버를 실행한다. 
+```bash
+$ sudo ip netns exec was python3 -m http.server
+
+Serving HTTP on 0.0.0.0 port 8000 (http://0.0.0.0:8000/) ...
+```
+그리고 다른 한쪽은 `bpftrace`를 사용해서 트레이싱을 진행한다.
+
+```bash
+sudo bpftrace -e 'kfunc:dev_hard_start_xmit
+{
+  if(args->dev->ifindex==2 || args->dev->ifindex==1) {
+    return;
+  }
+  printf("ifindex=%d\n", args->dev->ifindex);
+  print(kstack);
+}'
+
+Attaching 1 probe...
+
+ifindex=13
+dev_hard_start_xmit+8
+[...]
+__tcp_transmit_skb+1156
+tcp_connect+1168
+tcp_v4_connect+964
+```
+패킷을 전송하게 되면 커널 스택에서 볼 수 있는것처럼 기본적으로 상위 레이어부터 `dev_hard_start_xmit` -> `xmit_one` -> `netdev_start_xmit` -> `__netdev_start_xmit` -> `ndo_start_xmit` 로직을 수행한다. `ndo_start_xmit`함수포인터는 위에서 설명했듯이 `veth_xmit`과 연결된다. 
 
 ```C
+/* drivers/net/veth.c */
+static netdev_tx_t veth_xmit(struct sk_buff *skb, struct net_device *dev)
+{
+    [...]
+    ret = veth_forward_skb(rcv, skb, rq, use_napi); // if xdp attached, use_napi=true
+    [...]
+}
+
 static int veth_forward_skb(struct net_device *dev, struct sk_buff *skb,
 			    struct veth_rq *rq, bool xdp)
 {
@@ -124,35 +214,128 @@ static int veth_forward_skb(struct net_device *dev, struct sk_buff *skb,
 		__netif_rx(skb);
 }
 ```
+`veth_xmit`과 연결된 `veth_forward_skb`에서 xdp가 true라면 `veth_xdp_rx`함수를 호춯한다. 해당 함수는 ptr ring buffer queue에 데이터를 주입한다.
+```C
+/* drivers/net/veth.c */
+static int veth_xdp_rx(struct veth_rq *rq, struct sk_buff *skb)
+{
+	if (unlikely(ptr_ring_produce(&rq->xdp_ring, skb)))
+		return NETDEV_TX_BUSY; /* signal qdisc layer */
 
-
-```bash
- virtnet_xdp_handler+0
-        receive_small+616
-        receive_buf+264
-        virtnet_receive.constprop.0+724
-        virtnet_poll+104
-        __napi_poll+72
+	return NET_RX_SUCCESS; /* same as NETDEV_TX_OK */
+}
 ```
+주입은 `ptr_ring_produce`함수를 통해 진행된다. 생산자를 통해 삽입된 데이터는 NAPI Polling을 통해서 호출되는 `veth_poll` 함수를 통해 소비된다.
 
-```bash
-veth_xdp_rcv_skb+0
-        veth_poll+152
-        __napi_poll+72
-        net_rx_action+488
-        handle_softirqs+312
+```C
+/* drivers/net/veth.c */
+static int veth_poll(struct napi_struct *napi, int budget)
+{
+[...]
+	done = veth_xdp_rcv(rq, budget, &bq, &stats);
+[...]
+}
+
+static int veth_xdp_rcv(struct veth_rq *rq, int budget,
+			struct veth_xdp_tx_bq *bq,
+			struct veth_stats *stats)
+{
+	for (i = 0; i < budget; i++) {
+		void *ptr = __ptr_ring_consume(&rq->xdp_ring);
+
+		if (veth_is_xdp_frame(ptr)) {
+			/* ndo_xdp_xmit */
+[...]
+			frame = veth_xdp_rcv_one(rq, frame, bq, stats);
+[...]
+		} else {
+			/* ndo_start_xmit */
+			struct sk_buff *skb = ptr;
+[...]
+			skb = veth_xdp_rcv_skb(rq, skb, bq, stats);
+            if (skb) {
+				netif_receive_skb(skb);
+			}
+[...]
+		}
+		done++;
+	}
+[...]
+}
 ```
+`veth_xdp_rcv`함수에서 `__ptr_ring_consume`함수를 통해 `xdp_ring`에서 데이터를 소비한다. 소비된 데이터는 `veth_xdp_rcv_one`이나 `veth_xdp_rcv_skb`함수를 호출한다. 2개의 함수 모두 내부적으로 `bpf_prog_run_xdp` 함수를 호출하여 실제 `XDP 프로그램`을 실행한다. 해당 함수는 앞서 언급한 `Action`을 반환할 수 있고 `XDP_PASS`의 경우 `netif_receive_skb` 함수를 호출하여 네트워크 스택처리를 진행한다. `XDP_TX`를 반환하게 되면 아래 로직을 수행한다.
+```C
+/* drivers/net/veth.c */
+static struct sk_buff *veth_xdp_rcv_skb(struct veth_rq *rq,
+					struct sk_buff *skb,
+					struct veth_xdp_tx_bq *bq,
+					struct veth_stats *stats)
+{
+[...]
+	act = bpf_prog_run_xdp(xdp_prog, xdp);
+[...]
+	switch (act) {
+[...]
+	case XDP_TX:
+        veth_xdp_tx(rq, xdp, bq);
+    }
+}
+
+static int veth_poll(struct napi_struct *napi, int budget)
+{
+[...]
+	done = veth_xdp_rcv(rq, budget, &bq, &stats);
+[...]
+	if (stats.xdp_tx > 0)
+		veth_xdp_flush(rq, &bq);
+[...]
+}
+```
+`XDP_TX`를 반환하게 되면 `veth_xdp_tx`함수를 호출하여 처리했던 패킷을 frame으로 변환하여 queue에 넣는다. 다시 `veth_poll`로 돌아와서 `stats.xdp_tx`값이 0이상이 되기 때문에 `veth_xdp_flush`함수를 호출한다. 
+
+```C
+/* drivers/net/veth.c */
+static int veth_xdp_xmit(struct net_device *dev, int n,
+			 struct xdp_frame **frames,
+			 u32 flags, bool ndo_xmit)
+{
+[...]
+	for (i = 0; i < n; i++) {
+		struct xdp_frame *frame = frames[i];
+		void *ptr = veth_xdp_to_ptr(frame);
+
+		__ptr_ring_produce(&rq->xdp_ring, ptr);
+	}
+[...]
+}
+
+static void veth_xdp_flush_bq(struct veth_rq *rq, struct veth_xdp_tx_bq *bq)
+{
+[...]
+	sent = veth_xdp_xmit(rq->dev, bq->count, bq->q, 0, false);
+[...]
+}
+
+static void veth_xdp_flush(struct veth_rq *rq, struct veth_xdp_tx_bq *bq)
+{
+[...]
+	veth_xdp_flush_bq(rq, bq);
+[...]
+	__veth_xdp_flush(rcv_rq);
+}
+```
+`veth_xdp_xmit`함수는 이전에 `veth_xdp_tx`함수에서 bulk queue에 넣었던 frame을 `__ptr_ring_produce`를 통해 `xdp_ring`에 주입한다. 해당 함수 구간으로 통해 처음 말했던 `XDP_TX`가 어떻게 수신했던 `NIC`로 패킷을 되돌리는지 알 수 있다. 
+
+여기까지가 `XDP 프로그램`를 설치하고 `XDP_PASS`, `XDP_TX`일 떄의 간략한 동작 과정이다. 해당 설명이 목적이 아니기에 실제 네트워크 구조의 설명은 많은 부분이 생략됐으며 그 과정에서 예상치 못한 잘못된 내용이 존재할 수 있지만 대략적인 구조로 생각했으면 한다.
 
 ### 로드밸런서
 지금까지 XDP에 대해서 간략하게 알아보았다. 다음은 이 글의 목적인 XDP 로드밸런서를 구현하고 이를 테스트하는 시간을 가진다. XDP로드밸런서를 구현하기 위해서는 2가지의 방식이 존재한다. 
 
-#### NAT 로드밸런서 (Masquerading)
-가장 구현난이도가 낮은 방식이나 성능적인 측면에서 다음에 나올 Direct Server Return 방식보다는 좋지못하다. 
+가장 구현난이도가 낮은 방식이나 성능적인 측면에서 다음에 나올 `DSR(Direct Server Return)` 방식보다는 좋지못하다. 
 ![alt text](image-3.png)
-위는 NAT방식의 XDP 로드밸런서를 구현할 때 기본적인 구조이다. XDP는 NIC에서 패킷 수신 후 리눅스 네트워크 스택을 태우기전에 실행되는 구간이므로 ehternet frame과 ip, tcp header 및 option 처리가 필요하다. XDP 프로그램에서 트리거된 패킷을 살펴보면 목적지가 로드밸런서쪽으로 되어 있기 때문에 해당 값을 원하는 서버 목적지 정보 입력이 필요하다. 또한 패킷의 IP Header와 TCP Header 정보가 수정되었기 떄문에 각 각 Checksum 재계산이 필요하다. 
 
-#### DSR 로드밸런서
-> DSR은 Direct Server Return의 약어이다.
+위 사진은 XDP 로드밸런서를 구현할 때 가장 베이스가 되는 모델이라고 생각한다. XDP는 NIC에서 패킷 수신 후 리눅스 네트워크 스택을 태우기전에 실행되는 구간이므로 ethernet frame과 ip, tcp header 및 option 처리가 필요하다. XDP 프로그램에서 트리거된 패킷을 살펴보면 목적지가 로드밸런서쪽으로 되어 있기 때문에 해당 값을 원하는 서버 목적지 정보 입력이 필요하다. 또한 패킷의 IP Header와 TCP Header 정보가 수정되었기 떄문에 각 각 Checksum 재계산이 필요하다. 
+
 
 ### 테스트 및 퍼포먼스
 
@@ -160,25 +343,6 @@ veth_xdp_rcv_skb+0
 - https://www.cs.cornell.edu/~ragarwal/pubs/network-stack.pdf
 - https://d2.naver.com/helloworld/47667
 - The eXpress data path: fast programmable packet processing in the operating system kernel
-
-
-### 메모장
-napi_schedule() , sofrirq handler net_rx_action -> poll() 
-netif_receive_skb()
--> NIC가 인터럽트한 특정 CPU를 CPU0라고 할때 CPU0는 처음부터 끝까지 패킷 처리 담당
-
-XDP hook은 napi전이라서 CPU안쓰는듯
-
-generic, native,
-
-NAPI poll전인가? XDP HOOK이 트리거되는 시점이 정확히 어디인자 확인해야 할드
-
-
-
-sudo bpftrace -e '
-kprobe:netif_receive_skb {
-    $skb = (struct sk_buff *)arg0;
-    $dev = $skb->dev;
-    printf("ifname=%s pid=%d\n", $dev->name, pid);
-    print(kstack);
-}'
+- https://guanjunjian.github.io/2018/01/05/study-18-dev_forward_skb-source-analysis/
+- https://blog.csdn.net/qq_45090200/article/details/147226000
+- https://lpc.events/event/7/contributions/676/attachments/512/1000/paper.pdf
