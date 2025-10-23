@@ -215,6 +215,9 @@ static int veth_forward_skb(struct net_device *dev, struct sk_buff *skb,
 }
 ```
 `veth_xmit`과 연결된 `veth_forward_skb`에서 xdp가 true라면 `veth_xdp_rx`함수를 호춯한다. 해당 함수는 ptr ring buffer queue에 데이터를 주입한다.
+> __dev_forward_skb 함수는 상대 peer로 패킷 주입이 가능한지 다른 네트워크 네임스페이스로 넘어가는 패킷의 경우 관련 정보를 scrub 해야할지등을 결정한다. 
+> __dev_forward_skb가 아닌 dev_forward_skb는 내부적으로 __dev_forward_skb 후 netif_rx_internal를 호출한다. 
+
 ```C
 /* drivers/net/veth.c */
 static int veth_xdp_rx(struct veth_rq *rq, struct sk_buff *skb)
@@ -326,7 +329,9 @@ static void veth_xdp_flush(struct veth_rq *rq, struct veth_xdp_tx_bq *bq)
 ```
 `veth_xdp_xmit`함수는 이전에 `veth_xdp_tx`함수에서 bulk queue에 넣었던 frame을 `__ptr_ring_produce`를 통해 `xdp_ring`에 주입한다. 해당 함수 구간으로 통해 처음 말했던 `XDP_TX`가 어떻게 수신했던 `NIC`로 패킷을 되돌리는지 알 수 있다. 
 
-여기까지가 `XDP 프로그램`를 설치하고 `XDP_PASS`, `XDP_TX`일 떄의 간략한 동작 과정이다. 해당 설명이 목적이 아니기에 실제 네트워크 구조의 설명은 많은 부분이 생략됐으며 그 과정에서 예상치 못한 잘못된 내용이 존재할 수 있지만 대략적인 구조로 생각했으면 한다.
+여기까지가 `XDP 프로그램`를 설치하고 `XDP_PASS`, `XDP_TX`일 때의 간략한 동작 과정이다. 앞서 언급한것과 같이 커널을 우회하는 여러 기술보다 `XDP`의 경우 커널내부 소스와 통합되어있기 때문에 커널의 안정성기반으로 동작할 수 있다. 다만, 드라이버마다 `Native`모드 지원은 상이하기 때문에 지원되지 않는 드라이버는 `Generic`을 사용하게 된다.
+
+해당 설명이 목적이 아니기에 실제 네트워크 구조의 설명은 많은 부분이 생략됐으며 그 과정에서 예상치 못한 잘못된 내용이 존재할 수 있지만 대략적인 구조로 생각했으면 한다.
 
 ### 로드밸런서
 지금까지 XDP에 대해서 간략하게 알아보았다. 다음은 이 글의 목적인 XDP 로드밸런서를 구현하고 이를 테스트하는 시간을 가진다. XDP로드밸런서를 구현하기 위해서는 2가지의 방식이 존재한다. 
@@ -334,7 +339,10 @@ static void veth_xdp_flush(struct veth_rq *rq, struct veth_xdp_tx_bq *bq)
 가장 구현난이도가 낮은 방식이나 성능적인 측면에서 다음에 나올 `DSR(Direct Server Return)` 방식보다는 좋지못하다. 
 ![alt text](image-3.png)
 
-위 사진은 XDP 로드밸런서를 구현할 때 가장 베이스가 되는 모델이라고 생각한다. XDP는 NIC에서 패킷 수신 후 리눅스 네트워크 스택을 태우기전에 실행되는 구간이므로 ethernet frame과 ip, tcp header 및 option 처리가 필요하다. XDP 프로그램에서 트리거된 패킷을 살펴보면 목적지가 로드밸런서쪽으로 되어 있기 때문에 해당 값을 원하는 서버 목적지 정보 입력이 필요하다. 또한 패킷의 IP Header와 TCP Header 정보가 수정되었기 떄문에 각 각 Checksum 재계산이 필요하다. 
+위 사진은 XDP 로드밸런서를 구현할 때 가장 베이스가 되는 모델이라고 생각한다. XDP는 NIC에서 패킷 수신 후 리눅스 네트워크 스택을 태우기전에 실행되는 구간이므로 ethernet frame과 ip, tcp header 및 option 처리가 필요하다. XDP 프로그램에서 트리거된 패킷을 살펴보면 목적지가 로드밸런서쪽으로 되어 있기 때문에 해당 값을 원하는 서버 목적지 정보 입력이 필요하다. 또한 패킷의 IP Header와 TCP Header 정보가 수정되었기 때문에 각 각 Checksum 재계산이 필요하다. 그리고 로드밸런서쪽에서 클라이언트와 서버관 커넥션을 어떻게 유지할것인가도 중요하다.
+
+#### 코드 구조
+위에서 언급한 구조를 기반으로 `Cilium eBPF`를 사용해서 코드 레벨에서의 설명을 하고자 한다. 
 
 
 ### 테스트 및 퍼포먼스
