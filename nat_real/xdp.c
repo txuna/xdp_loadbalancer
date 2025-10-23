@@ -29,7 +29,7 @@ enum {
 	END_FIN,
 };
 
-#define MAX_SESSION 30000
+#define MAX_SESSION 40000
 
 // TCP STATE
 enum {
@@ -238,7 +238,7 @@ static __always_inline int is_closed(struct session *ss) {
 // key: client:10.201.0.1, client:port - lb:10.201.0.4, lb:8000
 static __always_inline int process_from_client(struct ethhdr *eth, struct iphdr *iph, struct tcphdr *tcph, void *data_end) {
 	__u32 hash = get_two_hash(iph->saddr, tcph->source);
-	__u32 port_num = (hash % MAX_SESSION) + 20000;
+	__u32 port_num = (hash % MAX_SESSION) + 10000;
 	__u32 server_key = hash % SERVER_NUM;
 
 	struct session *ss; 
@@ -436,17 +436,6 @@ int xdp_main(struct xdp_md *ctx) {
 	if ((void*)tcph + sizeof(*tcph) > data_end) {
 		return XDP_PASS;
 	}
-
-	// es = bpf_ringbuf_reserve(&events, sizeof(struct event), 0);
-	// if (!es) {
-	// 	return XDP_PASS;
-	// }
-	
-	// es->src_ip = iph->saddr;
-	// es->src_port = tcph->source;
-	// es->dst_ip = iph->daddr;
-	// es->dst_port = tcph->dest;
-	// bpf_ringbuf_submit(es, 0);
 
 	return process_packet(eth, iph, tcph, data_end);
 }
